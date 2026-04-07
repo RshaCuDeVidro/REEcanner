@@ -218,11 +218,11 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
             if not quiet:
                 if simple:
                     if sp == 443:
-                        sys.stdout.write(f"https://{ip_str}\n")
+                        sys.stdout.write(f"{ip_str}\n")
                     elif sp == 80:
-                        sys.stdout.write(f"http://{ip_str}\n")
+                        sys.stdout.write(f"{ip_str}\n")
                     else:
-                        sys.stdout.write(f"http://{ip_str}:{sp}\n")
+                        sys.stdout.write(f"{ip_str}:{sp}\n")
                 else:
                     # \r mv pro inicio
                     sys.stdout.write(f"\r\033[K{B}{G}found{E} {ip_str}:{sp}\n")
