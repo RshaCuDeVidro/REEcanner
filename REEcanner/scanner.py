@@ -23,7 +23,7 @@ def get_net_info():
         return iface, local_mac, gw_mac
     except: return None, None, None
 
-def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_event, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0):
+def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_event, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if hasattr(os, 'sched_setaffinity'):
         try: os.sched_setaffinity(0, {worker_id % (os.cpu_count() or 1)})
@@ -54,7 +54,7 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
     get_ip = inc_mgr.get_random_ip_int
     is_pub = bl_mgr.is_ip_int_public
     ports_len = len(ports)
-    batch_size = 1024
+    # batch_size comes from function parameter
     interval = (batch_size / rate_limit) if rate_limit > 0 else 0
     next_t = time.perf_counter()
     batch_msgs = []
@@ -231,7 +231,7 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
                 log_queue.put(json.dumps({"ip":ip_str,"port":sp,"time":datetime.now().isoformat()})+"\n")
 
 class Scanner:
-    def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False):
+    def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False, batch_size=4096):
         self.ports = ports
         self.rate_limit = rate_limit
         self.bl_mgr = blacklist_manager
@@ -257,6 +257,7 @@ class Scanner:
         self.shards = shards
         self.shard_id = shard_id
         self.checkpoint_file = checkpoint_file
+        self.batch_size = batch_size
 
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -271,7 +272,7 @@ class Scanner:
         rpw = self.rate_limit // self.workers_count
         procs = []
         for i in range(self.workers_count):
-            p = multiprocessing.Process(target=packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_event, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id))
+            p = multiprocessing.Process(target=packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_event, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size))
             p.start()
             procs.append(p)
         

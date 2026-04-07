@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--shards", type=int, default=1, help="total number of shards for distributed scanning")
     parser.add_argument("--shard-id", type=int, default=0, help="id of this shard (0 to shards-1)")
     parser.add_argument("--checkpoint", help="path to checkpoint file to resume scan")
+    parser.add_argument("--batch-size", type=int, default=4096, help="number of IPs to scan in each batch")
 
     args = parser.parse_args()
 
@@ -80,7 +81,8 @@ def main():
         inclusion_manager=inc_mgr, source_port=args.source_port if args.source_port > 0 else None,
         workers=args.workers, limit=args.limit, output_file=args.output, quiet=args.quiet,
         seed=args.seed, start_index=start_index, shards=args.shards, shard_id=args.shard_id,
-        checkpoint_file=args.checkpoint, simple=args.simple
+        checkpoint_file=args.checkpoint, simple=args.simple,
+        batch_size=args.batch_size
     )
 
     console.print(f"[bold green][*][/bold green] reecanner initialized. targeting [cyan]{len(ports)}[/cyan] ports.")
