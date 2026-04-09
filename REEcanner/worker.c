@@ -199,15 +199,21 @@ void run_worker(
         }
     }
 
-    //rate limit
+    //rate limit — ajusta batch pra manter intervalos ~100ms
+    int eff_batch = batch_size;
+    if (rate_limit > 0) {
+        int max_for_rate = (rate_limit + 9) / 10;  // ~100ms worth of packets
+        if (max_for_rate < 1) max_for_rate = 1;
+        if (eff_batch > max_for_rate) eff_batch = max_for_rate;
+    }
+
     uint64_t interval_ns = rate_limit > 0
-        ? (uint64_t)((double)batch_size / rate_limit * 1e9)
+        ? (uint64_t)((double)eff_batch / rate_limit * 1e9)
         : 0;
     uint64_t next_t = now_ns();
 
     int64_t cur_idx = start_index + worker_id;
     uint64_t rng = ((uint64_t)(worker_id + 1) * 0x9E3779B97F4A7C15ULL);
-    uint64_t local_sent = 0;
 
     // HOT LOOP
     while (likely(*run_flag)) {
@@ -216,10 +222,13 @@ void run_worker(
             uint64_t c = now_ns();
             if (c < next_t) {
                 uint64_t w = next_t - c;
-                if (w > 1000000) { /* > 1ms: sleep */
-                    struct timespec sl = {0, (long)w};
+                if (w > 1000000) {
+                    struct timespec sl = {
+                        (time_t)(w / 1000000000ULL),
+                        (long)(w % 1000000000ULL)
+                    };
                     nanosleep(&sl, NULL);
-                } else { /* busy-wait for precision */
+                } else {
                     while (now_ns() < next_t);
                 }
             }
@@ -227,7 +236,7 @@ void run_worker(
         }
 
         // fill batch
-        for (int i = 0; i < batch_size; i++) {
+        for (int i = 0; i < eff_batch; i++) {
             uint32_t ip_int;
             int attempts = 0;
 
@@ -287,22 +296,14 @@ void run_worker(
         }
 
         /* send batch */
-        int ret = sendmmsg(sockfd, msgs, batch_size, 0);
+        int ret = sendmmsg(sockfd, msgs, eff_batch, 0);
         if (likely(ret > 0)) {
-            local_sent += ret;
-            if (local_sent >= 4096) {
-                __atomic_fetch_add(pps_ptr, local_sent, __ATOMIC_RELAXED);
-                __atomic_fetch_add(sent_ptr, local_sent, __ATOMIC_RELAXED);
-                local_sent = 0;
-            }
+            __atomic_fetch_add(pps_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
+            __atomic_fetch_add(sent_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
         }
     }
 
 done:
-    if (local_sent > 0) {
-        __atomic_fetch_add(pps_ptr, local_sent, __ATOMIC_RELAXED);
-        __atomic_fetch_add(sent_ptr, local_sent, __ATOMIC_RELAXED);
-    }
 
 cleanup:
     close(sockfd);

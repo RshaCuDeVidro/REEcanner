@@ -346,7 +346,7 @@ class Scanner:
         rpw = self.rate_limit // self.workers_count
         procs = []
         if self.use_c:
-            console.print(f"[bold green][*][/bold green] using [cyan]C worker[/cyan] (worker.so)")
+            #console.print(f"[bold green][*][/bold green] using [cyan]C worker[/cyan] (worker.so)")
             for i in range(self.workers_count):
                 p = multiprocessing.Process(target=c_packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_flag, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size))
                 p.start()
