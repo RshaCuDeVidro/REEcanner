@@ -43,7 +43,7 @@ uint32_t fencrypt(uint32_t idx, const uint32_t k[4]) {
 }
 
 static inline __attribute__((always_inline))
-uint32_t fget(uint32_t idx, const uint32_t k[4], uint32_t max_val) {
+uint32_t fget(uint32_t idx, const uint32_t k[4], uint64_t max_val) {
     uint32_t x = fencrypt(idx, k);
     while (unlikely(x >= max_val)) x = fencrypt(x, k);
     return x;
@@ -96,7 +96,7 @@ void run_worker(
     int rate_limit,                 /* per-worker pps */
     const uint32_t *bl, int bl_len,
     const uint32_t *fkeys,          /* 4 feistel keys */
-    uint32_t total_ips,
+    uint64_t total_ips,
     const uint32_t *net_bases,
     const uint32_t *net_starts,
     int nets_len, int single_net,
@@ -237,7 +237,7 @@ void run_worker(
                     cur_idx += total_workers;
                     continue;
                 }
-                uint32_t shuf = fget((uint32_t)(cur_idx % total_ips), fkeys, total_ips);
+                uint32_t shuf = fget((uint32_t)((uint64_t)cur_idx % total_ips), fkeys, total_ips);
                 ip_int = get_ip(shuf, net_bases, net_starts, nets_len, single_net);
                 cur_idx += total_workers;
                 if (likely(is_public(ip_int, bl, bl_len))) break;

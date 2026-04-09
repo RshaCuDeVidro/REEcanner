@@ -23,7 +23,7 @@ try:
         ctypes.c_int,                                    # rate_limit
         ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,   # bl_ranges, bl_len
         ctypes.POINTER(ctypes.c_uint32),                 # feistel_keys (4)
-        ctypes.c_uint32,                                 # total_ips
+        ctypes.c_uint64,                                 # total_ips
         ctypes.POINTER(ctypes.c_uint32),                 # net_bases
         ctypes.POINTER(ctypes.c_uint32),                 # net_starts
         ctypes.c_int, ctypes.c_int,                      # nets_len, single_net
