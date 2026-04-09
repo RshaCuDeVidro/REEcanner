@@ -12,6 +12,36 @@ import queue
 import signal
 from datetime import datetime
 
+try:
+    _lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worker.so'))
+    _lib.run_worker.restype = None
+    _lib.run_worker.argtypes = [                         # trabalhar com worker.c : ->
+        ctypes.c_int,                                    # worker_id
+        ctypes.POINTER(ctypes.c_uint8),                  # src_ip (4 bytes)
+        ctypes.POINTER(ctypes.c_uint16), ctypes.c_int,   # ports, ports_len
+        ctypes.c_uint16,                                 # src_port
+        ctypes.c_int,                                    # rate_limit
+        ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,   # bl_ranges, bl_len
+        ctypes.POINTER(ctypes.c_uint32),                 # feistel_keys (4)
+        ctypes.c_uint32,                                 # total_ips
+        ctypes.POINTER(ctypes.c_uint32),                 # net_bases
+        ctypes.POINTER(ctypes.c_uint32),                 # net_starts
+        ctypes.c_int, ctypes.c_int,                      # nets_len, single_net
+        ctypes.POINTER(ctypes.c_int),                    # run_flag
+        ctypes.POINTER(ctypes.c_uint64),                 # pps_ptr
+        ctypes.POINTER(ctypes.c_uint64),                 # sent_ptr
+        ctypes.c_char_p,                                 # iface
+        ctypes.POINTER(ctypes.c_uint8),                  # lmac (6 bytes)
+        ctypes.POINTER(ctypes.c_uint8),                  # gmac (6 bytes)
+        ctypes.c_int,                                    # total_workers
+        ctypes.c_int64,                                  # start_index
+        ctypes.c_int, ctypes.c_int,                      # shards, shard_id
+        ctypes.c_int,                                    # batch_size
+    ]
+    HAS_C_WORKER = True
+except:
+    HAS_C_WORKER = False
+
 def get_net_info():
     try:
         gw_info = subprocess.check_output("ip route show default", shell=True).decode()
@@ -22,6 +52,48 @@ def get_net_info():
         gw_mac = next(line.split()[2] for line in arp_info.splitlines() if gw_ip in line)
         return iface, local_mac, gw_mac
     except: return None, None, None
+def c_packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_flag, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096):
+    """Thin wrapper: extract Python data → call C run_worker"""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    
+    lip = (ctypes.c_uint8 * 4)(*local_ip_bytes)
+    c_ports = (ctypes.c_uint16 * len(ports))(*ports)
+    
+    bl = bl_mgr._flat_ranges
+    c_bl = (ctypes.c_uint32 * len(bl))(*bl) if bl else (ctypes.c_uint32 * 0)()
+    
+    c_keys = (ctypes.c_uint32 * 4)(*inc_mgr.shuffler.keys)
+    total_ips = inc_mgr.total_ips
+    nets = inc_mgr.networks
+    c_bases = (ctypes.c_uint32 * len(nets))(*[n['net'] for n in nets])
+    c_starts = (ctypes.c_uint32 * len(nets))(*[n['start'] for n in nets])
+    
+    iface, l_mac, g_mac = net_info
+    c_iface = iface.encode() if iface else None
+    c_lmac = c_gmac = None
+    if iface and l_mac and g_mac:
+        c_lmac = (ctypes.c_uint8 * 6)(*bytes.fromhex(l_mac.replace(':', '')))
+        c_gmac = (ctypes.c_uint8 * 6)(*bytes.fromhex(g_mac.replace(':', '')))
+
+    _lib.run_worker(
+        worker_id,
+        lip,
+        c_ports, len(ports),
+        src_port,
+        rate_limit,
+        c_bl, len(bl),
+        c_keys,
+        total_ips,
+        c_bases, c_starts, len(nets), 1 if inc_mgr.single_net else 0,
+        ctypes.cast(ctypes.addressof(run_flag), ctypes.POINTER(ctypes.c_int)),
+        ctypes.cast(ctypes.addressof(pps_array) + worker_id * 8, ctypes.POINTER(ctypes.c_uint64)),
+        ctypes.cast(ctypes.addressof(sent_array) + worker_id * 8, ctypes.POINTER(ctypes.c_uint64)),
+        c_iface, c_lmac, c_gmac,
+        total_workers,
+        start_index,
+        shards, shard_id,
+        batch_size
+    )
 
 def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_event, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -246,10 +318,11 @@ class Scanner:
         self.simple = simple
         self.run_event = multiprocessing.Event()
         self.run_event.set()
+        self.run_flag = multiprocessing.RawValue(ctypes.c_int, 1)
         self.found_count = multiprocessing.Value('i', 0)
         
-        self.pps_array = multiprocessing.Array(ctypes.c_ulonglong, self.workers_count)
-        self.sent_array = multiprocessing.Array(ctypes.c_ulonglong, self.workers_count)
+        self.pps_array = multiprocessing.RawArray(ctypes.c_uint64, self.workers_count)
+        self.sent_array = multiprocessing.RawArray(ctypes.c_uint64, self.workers_count)
         
         self.net_info = get_net_info()
         self.seed = self.inc_mgr.shuffler.seed
@@ -258,6 +331,7 @@ class Scanner:
         self.shard_id = shard_id
         self.checkpoint_file = checkpoint_file
         self.batch_size = batch_size
+        self.use_c = HAS_C_WORKER
 
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -271,10 +345,18 @@ class Scanner:
         sniff_p.start()
         rpw = self.rate_limit // self.workers_count
         procs = []
-        for i in range(self.workers_count):
-            p = multiprocessing.Process(target=packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_event, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size))
-            p.start()
-            procs.append(p)
+        if self.use_c:
+            console.print(f"[bold green][*][/bold green] using [cyan]C worker[/cyan] (worker.so)")
+            for i in range(self.workers_count):
+                p = multiprocessing.Process(target=c_packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_flag, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size))
+                p.start()
+                procs.append(p)
+        else:
+            console.print(f"[bold yellow][*][/bold yellow] C worker not available, using Python fallback")
+            for i in range(self.workers_count):
+                p = multiprocessing.Process(target=packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_event, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size))
+                p.start()
+                procs.append(p)
         
         start_time = time.time()
         last_pps_check = start_time
@@ -283,7 +365,7 @@ class Scanner:
         last_checkpoint_time = time.time()
         
         try:
-            while self.run_event.is_set():
+            while self.run_event.is_set() and self.run_flag.value:
                 time.sleep(0.1)
                 now = time.time()
                 elapsed = now - last_pps_check
@@ -306,8 +388,10 @@ class Scanner:
                             json.dump({"index": current_idx}, f)
                         last_checkpoint_time = now
         except KeyboardInterrupt:
+            self.run_flag.value = 0
             self.run_event.clear()
         except:
+            self.run_flag.value = 0
             self.run_event.clear()
         
         total_duration = time.time() - start_time
@@ -324,7 +408,7 @@ class Scanner:
                     json.dump({"index": self.start_index + sent_total}, f)
             except: pass
 
-
+        self.run_flag.value = 0
         self.run_event.clear()
         try:
         
