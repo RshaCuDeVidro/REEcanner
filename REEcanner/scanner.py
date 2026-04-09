@@ -126,8 +126,12 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
     get_ip = inc_mgr.get_random_ip_int
     is_pub = bl_mgr.is_ip_int_public
     ports_len = len(ports)
-    # batch_size comes from function parameter
-    interval = (batch_size / rate_limit) if rate_limit > 0 else 0
+    # dynamic eff_batch to keep intervals ~100ms
+    eff_batch = batch_size
+    if rate_limit > 0:
+        max_for_rate = max(1, (rate_limit + 9) // 10)
+        eff_batch = min(eff_batch, max_for_rate)
+    interval = (eff_batch / rate_limit) if rate_limit > 0 else 0
     next_t = time.perf_counter()
     batch_msgs = []
     off = 14 if iface else 0
@@ -135,7 +139,7 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
     if iface:
         g_mac_bytes = bytes.fromhex(g_mac.replace(':',''))
         l_mac_bytes = bytes.fromhex(l_mac.replace(':',''))
-    for _ in range(batch_size):
+    for _ in range(eff_batch):
         buf = bytearray(pkt_len)
         if iface: _pack_into('!6s6sH', buf, 0, g_mac_bytes, l_mac_bytes, 0x0800)
         _pack_into('!BBHHHBB', buf, off, 0x45, 0, 40, 54321, 0, 64, 6)
@@ -143,7 +147,6 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
         _pack_into('!H', buf, off+20, src_port)
         _pack_into('!BBH', buf, off+32, 0x50, 2, 5840)
         batch_msgs.append([buf, 0, None if iface else (None, 0)])
-    local_sent = 0
     while run_event.is_set():
         if interval > 0:
             c = time.perf_counter()
@@ -153,7 +156,7 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
                 else: 
                     while time.perf_counter() < next_t: pass
             next_t += interval
-        for i in range(batch_size):
+        for i in range(eff_batch):
             attempts = 0
             while True:
                 if shards > 1 and (current_index % shards) != shard_id:
@@ -207,11 +210,8 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
                 for m in batch_msgs: 
                     if iface: _send(m[0])
                     else: _sendto(m[0], m[2])
-            local_sent += batch_size
-            if local_sent >= 4096:
-                pps_array[worker_id] += local_sent
-                sent_array[worker_id] += local_sent
-                local_sent = 0
+            pps_array[worker_id] += eff_batch
+            sent_array[worker_id] += eff_batch
         except: pass
 
 def output_writer(q: queue.Queue, filepath: str):
@@ -232,7 +232,7 @@ def output_writer(q: queue.Queue, filepath: str):
             f.write("".join(buffer))
             f.flush()
 
-def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_color, limit, simple=False):
+def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_color, limit, simple=False, run_flag=None):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
@@ -285,6 +285,8 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
                 found_count.value += 1
                 if limit > 0 and found_count.value >= limit:
                     run_event.clear()
+                    if run_flag is not None:
+                        run_flag.value = 0
             
             ip_str = f"{data[12]}.{data[13]}.{data[14]}.{data[15]}"
             if not quiet:
@@ -341,7 +343,7 @@ class Scanner:
         finally: s.close()
 
     def run(self, console):
-        sniff_p = multiprocessing.Process(target=sniffer_process, args=(self.src_port, self.run_event, self.found_count, self.output_file, self.quiet, not console.no_color, self.limit, self.simple))
+        sniff_p = multiprocessing.Process(target=sniffer_process, args=(self.src_port, self.run_event, self.found_count, self.output_file, self.quiet, not console.no_color, self.limit, self.simple, self.run_flag))
         sniff_p.start()
         rpw = self.rate_limit // self.workers_count
         procs = []

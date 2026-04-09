@@ -42,8 +42,8 @@ def main():
         console.print(f"[bold red]error:[/bold red] {e}")
         sys.exit(1)
 
-    if args.rate_limit > 10000 and not args.override_safety:
-        console.print("[bold red][!] error: scanning above 10,000 pps requires explicit approval[/bold red]")
+    if (args.rate_limit > 10000 or args.rate_limit == 0) and not args.override_safety:
+        console.print("[bold red][!] error: scanning above 10,000 pps (or unlimited) requires explicit approval[/bold red]")
         console.print("[bold red][!] please use the --override-safety flag to acknowledge the risks[/bold red]")
         sys.exit(1)
 
