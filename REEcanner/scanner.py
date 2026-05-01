@@ -37,6 +37,10 @@ try:
         ctypes.c_int64,                                  # start_index
         ctypes.c_int, ctypes.c_int,                      # shards, shard_id
         ctypes.c_int,                                    # batch_size
+        ctypes.c_int,                                    # half_bits
+        ctypes.c_uint32,                                 # feistel_mask
+        ctypes.c_int,                                    # retries
+        ctypes.c_int,                                    # is_udp
     ]
     HAS_C_WORKER = True
 except:
@@ -52,7 +56,7 @@ def get_net_info():
         gw_mac = next(line.split()[2] for line in arp_info.splitlines() if gw_ip in line)
         return iface, local_mac, gw_mac
     except: return None, None, None
-def c_packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_flag, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096):
+def c_packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_flag, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096, retries=1, is_udp=0):
     """Thin wrapper: extract Python data → call C run_worker"""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     
@@ -92,10 +96,14 @@ def c_packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_m
         total_workers,
         start_index,
         shards, shard_id,
-        batch_size
+        batch_size,
+        inc_mgr.shuffler.half_bits,
+        inc_mgr.shuffler.mask,
+        retries,
+        is_udp
     )
 
-def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_event, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096):
+def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_event, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096, retries=1, is_udp=0):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if hasattr(os, 'sched_setaffinity'):
         try: os.sched_setaffinity(0, {worker_id % (os.cpu_count() or 1)})
@@ -125,8 +133,10 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
     
     get_ip = inc_mgr.get_random_ip_int
     is_pub = bl_mgr.is_ip_int_public
+    total_ips = inc_mgr.total_ips
+    total_work = total_ips * retries
     ports_len = len(ports)
-    # dynamic eff_batch to keep intervals ~100ms
+    # dynamic eff_batch pra manter intervalo ~100ms
     eff_batch = batch_size
     if rate_limit > 0:
         max_for_rate = max(1, (rate_limit + 9) // 10)
@@ -156,9 +166,17 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
                 else: 
                     while time.perf_counter() < next_t: pass
             next_t += interval
+        batch_count = 0
+        scan_done = False
         for i in range(eff_batch):
+            if current_index >= total_work:
+                scan_done = True
+                break
             attempts = 0
             while True:
+                if current_index >= total_work:
+                    scan_done = True
+                    break
                 if shards > 1 and (current_index % shards) != shard_id:
                     current_index += total_workers
                     continue
@@ -171,6 +189,7 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
                     run_event.clear()
                     return
                 if not run_event.is_set(): return
+            if scan_done: break
 
             rng_state = (rng_state ^ (rng_state << 13)) & 0xFFFFFFFFFFFFFFFF
             rng_state = (rng_state ^ (rng_state >> 7)) & 0xFFFFFFFFFFFFFFFF
@@ -204,15 +223,18 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
             
             if not iface: 
                 batch_msgs[i][2] = (f"{(ip_int>>24)&255}.{(ip_int>>16)&255}.{(ip_int>>8)&255}.{ip_int&255}", 0)
+            batch_count += 1
         try:
-            if _sendmmsg: _sendmmsg(batch_msgs)
-            else:
-                for m in batch_msgs: 
-                    if iface: _send(m[0])
-                    else: _sendto(m[0], m[2])
-            pps_array[worker_id] += eff_batch
-            sent_array[worker_id] += eff_batch
+            if batch_count > 0:
+                if _sendmmsg: _sendmmsg(batch_msgs[:batch_count])
+                else:
+                    for m in batch_msgs[:batch_count]: 
+                        if iface: _send(m[0])
+                        else: _sendto(m[0], m[2])
+                pps_array[worker_id] += batch_count
+                sent_array[worker_id] += batch_count
         except: pass
+        if scan_done: return
 
 def output_writer(q: queue.Queue, filepath: str):
     buffer = []
@@ -232,12 +254,19 @@ def output_writer(q: queue.Queue, filepath: str):
             f.write("".join(buffer))
             f.flush()
 
-def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_color, limit, simple=False, run_flag=None):
+def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_color, limit, simple=False, run_flag=None, sniffer_ready=None, resolve=False, results_list=None, probe_queue=None, udp=False):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+        if udp:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64*1024*1024)
-    except: return
+    except:
+        if sniffer_ready: sniffer_ready.set()
+        return
+    
+    if sniffer_ready: sniffer_ready.set()
     
     _recvmmsg = getattr(sock, 'recvmmsg', None)
     G, B, E = ("\033[92m", "\033[1m", "\033[0m") if use_color else ("", "", "")
@@ -255,11 +284,11 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
             if _recvmmsg:
                 msgs = _recvmmsg(vlen, socket.MSG_DONTWAIT)
                 for data, _, _, _ in msgs:
-                    process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple)
+                    process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp)
             else:
                 sock.settimeout(0.1)
                 data, _ = sock.recvfrom(65535)
-                process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple)
+                process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp)
         except (socket.timeout, BlockingIOError): continue
         except: continue
         
@@ -267,10 +296,35 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
         q.put(None)
         writer_thread.join()
 
-def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G, B, E, run_event, limit, simple=False):
+def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G, B, E, run_event, limit, simple=False, resolve=False, results_list=None, probe_queue=None, udp=False):
     iph_len = (data[0] & 0x0F) << 2
-    if len(data) < iph_len + 20: return
+    if len(data) < iph_len + 8: return
     
+    if udp:
+        # UDP response: dst port must match our src_port
+        dp = (data[iph_len + 2] << 8) | data[iph_len + 3]
+        if dp != src_port: return
+        sp = (data[iph_len] << 8) | data[iph_len + 1]  # remote source port = the open port
+        ip_int = (data[12] << 24) | (data[13] << 16) | (data[14] << 8) | data[15]
+        host_key = (ip_int << 16) | sp
+        if host_key in seen_hosts: return
+        seen_hosts.add(host_key)
+        with found_count.get_lock():
+            found_count.value += 1
+            if limit > 0 and found_count.value >= limit:
+                run_event.clear()
+        ip_str = f"{data[12]}.{data[13]}.{data[14]}.{data[15]}"
+        if not quiet:
+            if simple:
+                sys.stdout.write(f"{ip_str}:{sp}\n")
+            else:
+                sys.stdout.write(f"\r\033[K{B}{G}found{E} {ip_str}:{sp}/udp\n")
+            sys.stdout.flush()
+        if results_list is not None:
+            results_list.append({'ip': ip_str, 'port': sp, 'proto': 'udp'})
+        return
+    
+    if len(data) < iph_len + 20: return
     dp = (data[iph_len + 2] << 8) | data[iph_len + 3]
     if dp == src_port:
         if (data[iph_len + 13] & 0x12) == 0x12:
@@ -289,23 +343,57 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
                         run_flag.value = 0
             
             ip_str = f"{data[12]}.{data[13]}.{data[14]}.{data[15]}"
+            # OS fingerprint from TTL + window
+            ttl = data[8]
+            window = (data[iph_len + 14] << 8) | data[iph_len + 15]
+            try:
+                from REEcanner.fingerprint import guess_os
+                os_guess = guess_os(ttl, window)
+            except: os_guess = ""
+            # reverse DNS
+            hostname = ""
+            if resolve:
+                try: hostname = socket.gethostbyaddr(ip_str)[0]
+                except: pass
+            # service name
+            try:
+                from REEcanner.ports import get_service_name
+                svc = get_service_name(sp)
+            except: svc = ""
+            
             if not quiet:
                 if simple:
-                    if sp == 443:
-                        sys.stdout.write(f"{ip_str}\n")
-                    elif sp == 80:
+                    if sp in (80, 443):
                         sys.stdout.write(f"{ip_str}\n")
                     else:
                         sys.stdout.write(f"{ip_str}:{sp}\n")
                 else:
-                    # \r mv pro inicio
-                    sys.stdout.write(f"\r\033[K{B}{G}found{E} {ip_str}:{sp}\n")
+                    extra = ""
+                    if os_guess: extra += f" {os_guess}"
+                    if hostname: extra += f" ({hostname})"
+                    if svc: extra += f" [{svc}]"
+                    sys.stdout.write(f"\r\033[K{B}{G}found{E} {ip_str}:{sp}{extra}\n")
                 sys.stdout.flush()
             if log_queue is not None:
-                log_queue.put(json.dumps({"ip":ip_str,"port":sp,"time":datetime.now().isoformat()})+"\n")
+                entry = {"ip":ip_str,"port":sp,"time":datetime.now().isoformat()}
+                if hostname: entry["hostname"] = hostname
+                if svc: entry["service"] = svc
+                if os_guess: entry["os"] = os_guess
+                log_queue.put(json.dumps(entry)+"\n")
+            # collect for output formats
+            if results_list is not None:
+                r = {'ip': ip_str, 'port': sp, 'proto': 'tcp'}
+                if os_guess: r['os'] = os_guess
+                if hostname: r['hostname'] = hostname
+                if svc: r['service'] = svc
+                results_list.append(r)
+            # submit for probing
+            if probe_queue is not None:
+                try: probe_queue.put_nowait((ip_str, sp))
+                except: pass
 
 class Scanner:
-    def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False, batch_size=4096):
+    def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False, batch_size=4096, retries=1, resolve=False, banners=False, http_probe=False, vulns=False, udp=False, adaptive=False):
         self.ports = ports
         self.rate_limit = rate_limit
         self.bl_mgr = blacklist_manager
@@ -333,7 +421,19 @@ class Scanner:
         self.shard_id = shard_id
         self.checkpoint_file = checkpoint_file
         self.batch_size = batch_size
+        self.retries = retries
+        self.resolve = resolve
+        self.banners = banners
+        self.http_probe = http_probe
+        self.vulns = vulns
+        self.udp = udp
+        self.adaptive = adaptive
+        self.total_work = self.inc_mgr.total_ips * self.retries
         self.use_c = HAS_C_WORKER
+        # shared results list for output formats
+        self._results_manager = multiprocessing.Manager()
+        self._results_list = self._results_manager.list()
+        self._probe_queue = self._results_manager.Queue() if (banners or http_probe) else None
 
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -343,20 +443,34 @@ class Scanner:
         finally: s.close()
 
     def run(self, console):
-        sniff_p = multiprocessing.Process(target=sniffer_process, args=(self.src_port, self.run_event, self.found_count, self.output_file, self.quiet, not console.no_color, self.limit, self.simple, self.run_flag))
+        # start probe engine if needed
+        probe_engine = None
+        if self.banners or self.http_probe or self.vulns:
+            from REEcanner.probes import ProbeEngine
+            probe_engine = ProbeEngine(do_banners=self.banners, do_http=self.http_probe, do_vulns=self.vulns, use_color=not console.no_color, quiet=self.quiet, simple=self.simple)
+            probe_engine.start()
+        
+        sniffer_ready = multiprocessing.Event()
+        sniff_p = multiprocessing.Process(target=sniffer_process, args=(
+            self.src_port, self.run_event, self.found_count, self.output_file,
+            self.quiet, not console.no_color, self.limit, self.simple,
+            self.run_flag, sniffer_ready, self.resolve, self._results_list,
+            self._probe_queue, self.udp
+        ))
         sniff_p.start()
+        sniffer_ready.wait(timeout=5.0)  # esperar sniffer ficar pronto
         rpw = self.rate_limit // self.workers_count
         procs = []
         if self.use_c:
             #console.print(f"[bold green][*][/bold green] using [cyan]C worker[/cyan] (worker.so)")
             for i in range(self.workers_count):
-                p = multiprocessing.Process(target=c_packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_flag, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size))
+                p = multiprocessing.Process(target=c_packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_flag, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size, self.retries, 1 if self.udp else 0))
                 p.start()
                 procs.append(p)
         else:
             console.print(f"[bold yellow][*][/bold yellow] C worker not available, using Python fallback")
             for i in range(self.workers_count):
-                p = multiprocessing.Process(target=packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_event, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size))
+                p = multiprocessing.Process(target=packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_event, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size, self.retries, 1 if self.udp else 0))
                 p.start()
                 procs.append(p)
         
@@ -365,10 +479,31 @@ class Scanner:
         sys.stderr.write("\n")
         
         last_checkpoint_time = time.time()
-        
+        grace_period = 3.0  # imitando masscan, demorar um tico pro scan terminar 
+        grace_start = None
+        curr_pps = 0.0
         try:
             while self.run_event.is_set() and self.run_flag.value:
                 time.sleep(0.1)
+                
+                # ver se terminou
+                if grace_start is None and all(not p.is_alive() for p in procs):
+                    grace_start = time.time()
+                    # final progress update
+                    sent_total = sum(self.sent_array)
+                    found_total = self.found_count.value
+                    sent_fmt = f"{sent_total:,}".replace(',', '.')
+                    pct = min(100.0, sent_total / self.total_work * 100) if self.total_work > 0 else 100.0
+                    filled = int(pct / 5)
+                    bar = '█' * filled + '░' * (20 - filled)
+                    sys.stderr.write(f"\r[{bar}] {pct:5.1f}% | {sent_fmt} sent | found: {found_total}\033[K\n")
+                    sys.stderr.write(f"[*] scan complete, waiting {grace_period:.0f}s for responses...\n")
+                    sys.stderr.flush()
+                
+                if grace_start and (time.time() - grace_start >= grace_period):
+                    break
+                
+                # pps calculo
                 now = time.time()
                 elapsed = now - last_pps_check
                 if elapsed >= 1.0:
@@ -376,25 +511,59 @@ class Scanner:
                     for i in range(self.workers_count): self.pps_array[i] = 0
                     last_pps_check = now
                     
+                    if self.checkpoint_file and (now - last_checkpoint_time > 10.0):
+                        sent_total = sum(self.sent_array)
+                        current_idx = self.start_index + sent_total
+                        with open(self.checkpoint_file, 'w') as f:
+                            json.dump({"index": current_idx}, f)
+                        last_checkpoint_time = now
+                
+                # progress bar todo tick
+                if grace_start is None:
                     sent_total = sum(self.sent_array)
                     found_total = self.found_count.value
                     sent_fmt = f"{sent_total:,}".replace(',', '.')
                     pps_fmt = f"{curr_pps:,.0f}".replace(',', '.')
-                    current_idx = self.start_index + sent_total
-                    #-> pipe linux
-                    sys.stderr.write(f"\r[*] sent: {sent_fmt} | rate: {pps_fmt} pps | found: {found_total} | index: {current_idx}\033[K")
+                    pct = min(100.0, sent_total / self.total_work * 100) if self.total_work > 0 else 0
+                    filled = int(pct / 5)
+                    bar = '█' * filled + '░' * (20 - filled) #<- peguei de uma dotfile do waybar kkkkkk
+                    # ETA
+                    if curr_pps > 0 and sent_total < self.total_work:
+                        remaining = self.total_work - sent_total
+                        eta_s = remaining / curr_pps
+                        if eta_s >= 60:
+                            eta_str = f" | eta: {eta_s/60:.1f}m"
+                        else:
+                            eta_str = f" | eta: {eta_s:.0f}s"
+                    else:
+                        eta_str = ""
+                    sys.stderr.write(f"\r[{bar}] {pct:5.1f}% | {sent_fmt} sent @ {pps_fmt} pps | found: {found_total}{eta_str}\033[K")
                     sys.stderr.flush()
-                    
-                    if self.checkpoint_file and (now - last_checkpoint_time > 10.0):
-                        with open(self.checkpoint_file, 'w') as f:
-                            json.dump({"index": current_idx}, f)
-                        last_checkpoint_time = now
+                
+                # adaptive rate: adjust if actual << target
+                if self.adaptive and curr_pps > 0:
+                    ratio = curr_pps / self.rate_limit if self.rate_limit > 0 else 1.0
+                    if ratio < 0.5:
+                        sys.stderr.write(f"\n[!] adaptive: actual rate {curr_pps:.0f} << target {self.rate_limit}, possible congestion\033[K\n")
+                        sys.stderr.flush()
         except KeyboardInterrupt:
             self.run_flag.value = 0
             self.run_event.clear()
         except:
             self.run_flag.value = 0
             self.run_event.clear()
+        
+        # drain probe queue
+        if probe_engine and self._probe_queue:
+            while not self._probe_queue.empty():
+                try:
+                    ip, port = self._probe_queue.get_nowait()
+                    probe_engine.submit(ip, port)
+                except: break
+            # wait for probes to finish
+            import time as _t
+            _t.sleep(1)
+            probe_engine.stop()
         
         total_duration = time.time() - start_time
         sent_total = sum(self.sent_array)
@@ -417,7 +586,6 @@ class Scanner:
             for p in procs + [sniff_p]:
                 p.join(timeout=0.2)
             
-            # gepetot: força terminar se tiver is_alive true
             for p in procs + [sniff_p]:
                 if p.is_alive():
                     p.terminate()
@@ -428,6 +596,21 @@ class Scanner:
                 if p.is_alive():
                     p.terminate()
         except: pass
+
+    def get_results(self):
+        """get collected scan results for output formats"""
+        results = list(self._results_list)
+        # merge probe results if available
+        if hasattr(self, '_probe_engine_results'):
+            probe_map = {}
+            for pr in self._probe_engine_results:
+                key = (pr['ip'], pr['port'])
+                probe_map[key] = pr
+            for r in results:
+                key = (r['ip'], r['port'])
+                if key in probe_map:
+                    r.update(probe_map[key])
+        return results
 
     @property
     def found_total(self):

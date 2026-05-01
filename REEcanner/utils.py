@@ -41,17 +41,24 @@ class FeistelShuffler:
         self.seed = key
         self.keys = [(key >> (8 * i)) & 0xFFFFFFFF for i in range(4)]
 
+        #bloco dinamico sizing, nao mexer da muito bug mesmo, trust me
+        bits = max(2, (max_val - 1).bit_length()) if max_val > 1 else 2
+        if bits % 2:
+            bits += 1
+        self.half_bits = bits // 2
+        self.mask = (1 << self.half_bits) - 1
+
     def _round_function(self, r: int, k: int) -> int:
-        val = (r ^ k) & 0xFFFF
+        val = (r ^ k) & self.mask
         val = (val * 0x41C64E6D) + 0x3039
-        return (val ^ (val >> 8)) & 0xFFFF
+        return (val ^ (val >> 8)) & self.mask
 
     def _encrypt(self, index: int) -> int:
-        l = (index >> 16) & 0xFFFF
-        r = index & 0xFFFF
+        l = (index >> self.half_bits) & self.mask
+        r = index & self.mask
         for i in range(4):
             l, r = r, l ^ self._round_function(r, self.keys[i])
-        return (r << 16) | l
+        return (r << self.half_bits) | l
 
     def get(self, index: int) -> int:
         x = self._encrypt(index)

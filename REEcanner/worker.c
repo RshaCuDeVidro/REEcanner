@@ -26,26 +26,26 @@
 // feistel cifra 
 
 static inline __attribute__((always_inline))
-uint16_t fround(uint16_t r, uint32_t k) {
-    uint32_t v = (uint32_t)(r ^ (uint16_t)k);
+uint32_t fround(uint32_t r, uint32_t k, uint32_t mask) {
+    uint32_t v = (r ^ k) & mask;
     v = v * 0x41C64E6DU + 0x3039U;
-    return (uint16_t)(v ^ (v >> 8));
+    return (v ^ (v >> 8)) & mask;
 }
 
 static inline __attribute__((always_inline))
-uint32_t fencrypt(uint32_t idx, const uint32_t k[4]) {
-    uint16_t l = idx >> 16, r = idx & 0xFFFF, t;
-    t=r; r=l^fround(r,k[0]); l=t;
-    t=r; r=l^fround(r,k[1]); l=t;
-    t=r; r=l^fround(r,k[2]); l=t;
-    t=r; r=l^fround(r,k[3]); l=t;
-    return ((uint32_t)r << 16) | l;
+uint32_t fencrypt(uint32_t idx, const uint32_t k[4], int half_bits, uint32_t mask) {
+    uint32_t l = (idx >> half_bits) & mask, r = idx & mask, t;
+    t=r; r=l^fround(r,k[0],mask); l=t;
+    t=r; r=l^fround(r,k[1],mask); l=t;
+    t=r; r=l^fround(r,k[2],mask); l=t;
+    t=r; r=l^fround(r,k[3],mask); l=t;
+    return (r << half_bits) | l;
 }
 
 static inline __attribute__((always_inline))
-uint32_t fget(uint32_t idx, const uint32_t k[4], uint64_t max_val) {
-    uint32_t x = fencrypt(idx, k);
-    while (unlikely(x >= max_val)) x = fencrypt(x, k);
+uint32_t fget(uint32_t idx, const uint32_t k[4], uint64_t max_val, int half_bits, uint32_t mask) {
+    uint32_t x = fencrypt(idx, k, half_bits, mask);
+    while (unlikely(x >= max_val)) x = fencrypt(x, k, half_bits, mask);
     return x;
 }
 
@@ -109,7 +109,11 @@ void run_worker(
     int total_workers,
     int64_t start_index,
     int shards, int shard_id,
-    int batch_size
+    int batch_size,
+    int half_bits,
+    uint32_t feistel_mask,
+    int retries,
+    int is_udp
 ) {
     signal(SIGINT, SIG_IGN);
 
@@ -126,7 +130,9 @@ void run_worker(
     //socket de verdade
     int sockfd, use_afp = (iface != NULL);
     int off = use_afp ? 14 : 0;
-    int pkt_len = use_afp ? 54 : 40;
+    /* TCP = 20 IP + 20 TCP = 40,  UDP = 20 IP + 8 UDP = 28 */
+    int payload_len = is_udp ? 28 : 40;
+    int pkt_len = off + payload_len;
 
     if (use_afp) {
         sockfd = socket(AF_PACKET, SOCK_RAW, 0);
@@ -149,10 +155,12 @@ void run_worker(
     // pre-compute static checksum parts
     uint16_t sw0 = ((uint16_t)src_ip[0] << 8) | src_ip[1];
     uint16_t sw1 = ((uint16_t)src_ip[2] << 8) | src_ip[3];
-    uint32_t ip_static = 0x4500u + 40u + 54321u + 0u + (64u << 8 | 6u) + sw0 + sw1;
+    /* IP static sum: ver+ihl+tos + total_len + id + flags_frag + ttl_proto + src_ip */
+    uint8_t ip_proto = is_udp ? 17 : 6;
+    uint32_t ip_static = 0x4500u + (uint32_t)payload_len + 54321u + 0u + (64u << 8 | ip_proto) + sw0 + sw1;
 
     // allocate contiguous batch buffer
-    uint8_t *batch_buf = (uint8_t *)malloc((size_t)batch_size * pkt_len);
+    uint8_t *batch_buf = (uint8_t *)calloc((size_t)batch_size, pkt_len);
     struct mmsghdr *msgs = (struct mmsghdr *)calloc(batch_size, sizeof(struct mmsghdr));
     struct iovec *iovs = (struct iovec *)malloc((size_t)batch_size * sizeof(struct iovec));
     struct sockaddr_in *addrs = NULL;
@@ -173,19 +181,30 @@ void run_worker(
         // ip header
         pkt[off]    = 0x45;
         pkt[off+1]  = 0;
-        pkt[off+2]  = 0; pkt[off+3] = 40;      /* total len */
+        pkt[off+2]  = (payload_len >> 8) & 0xFF;
+        pkt[off+3]  = payload_len & 0xFF;
         pkt[off+4]  = 0xD4; pkt[off+5] = 0x31;  /* id=54321 */
         pkt[off+6]  = 0; pkt[off+7] = 0;
         pkt[off+8]  = 64;                        /* ttl */
-        pkt[off+9]  = 6;                          /* proto=TCP */
+        pkt[off+9]  = ip_proto;                   /* proto: TCP=6 UDP=17 */
         memcpy(pkt + off + 12, src_ip, 4);        /* src ip */
-        // tcp header
-        pkt[off+20] = src_port >> 8;
-        pkt[off+21] = src_port & 0xFF;
-        // seq=0, ack=0 ja zerados
-        pkt[off+32] = 0x50;                       /* data offset */
-        pkt[off+33] = 0x02;                       /* SYN */
-        pkt[off+34] = 0x16; pkt[off+35] = 0xD0;  /* window=5840 */
+
+        if (is_udp) {
+            // udp header: src_port, dst_port(set per-pkt), length=8, checksum=0
+            pkt[off+20] = src_port >> 8;
+            pkt[off+21] = src_port & 0xFF;
+            // dst port set per-packet at off+22,23
+            pkt[off+24] = 0; pkt[off+25] = 8;    /* udp length = 8 */
+            pkt[off+26] = 0; pkt[off+27] = 0;    /* checksum = 0 (optional in IPv4) */
+        } else {
+            // tcp header
+            pkt[off+20] = src_port >> 8;
+            pkt[off+21] = src_port & 0xFF;
+            // seq=0, ack=0 ja zerados
+            pkt[off+32] = 0x50;                       /* data offset */
+            pkt[off+33] = 0x02;                       /* SYN */
+            pkt[off+34] = 0x16; pkt[off+35] = 0xD0;  /* window=5840 */
+        }
 
         iovs[i].iov_base = pkt;
         iovs[i].iov_len = pkt_len;
@@ -214,6 +233,7 @@ void run_worker(
 
     int64_t cur_idx = start_index + worker_id;
     uint64_t rng = ((uint64_t)(worker_id + 1) * 0x9E3779B97F4A7C15ULL);
+    uint64_t total_work = total_ips * (uint64_t)retries;
 
     // HOT LOOP
     while (likely(*run_flag)) {
@@ -236,17 +256,19 @@ void run_worker(
         }
 
         // fill batch
+        int batch_count = 0;
         for (int i = 0; i < eff_batch; i++) {
             uint32_t ip_int;
             int attempts = 0;
 
             // gerar ip publico valido
             for (;;) {
+                if (unlikely((uint64_t)cur_idx >= total_work)) goto flush;
                 if (unlikely(shards > 1 && (cur_idx % shards) != shard_id)) {
                     cur_idx += total_workers;
                     continue;
                 }
-                uint32_t shuf = fget((uint32_t)((uint64_t)cur_idx % total_ips), fkeys, total_ips);
+                uint32_t shuf = fget((uint32_t)((uint64_t)cur_idx % total_ips), fkeys, total_ips, half_bits, feistel_mask);
                 ip_int = get_ip(shuf, net_bases, net_starts, nets_len, single_net);
                 cur_idx += total_workers;
                 if (likely(is_public(ip_int, bl, bl_len))) break;
@@ -277,30 +299,56 @@ void run_worker(
             p[off+18] = (ip_int >> 8) & 0xFF;
             p[off+19] = ip_int & 0xFF;
 
-            // tcp header port do destino
+            // dst port (same offset for both TCP and UDP)
             p[off+22] = port >> 8;
             p[off+23] = port & 0xFF;
 
-            //checksum tcp header 
-            uint32_t st = (uint32_t)sw0 + sw1 + iph + ipl + 26u + src_port + port + 0x5002u + 5840u;
-            st = (st >> 16) + (st & 0xFFFF);
-            st = (st >> 16) + (st & 0xFFFF);
-            uint16_t cs_tcp = ~st & 0xFFFF;
-            p[off+36] = cs_tcp >> 8;
-            p[off+37] = cs_tcp & 0xFF;
+            if (!is_udp) {
+                //checksum tcp header 
+                uint32_t st = (uint32_t)sw0 + sw1 + iph + ipl + 26u + src_port + port + 0x5002u + 5840u;
+                st = (st >> 16) + (st & 0xFFFF);
+                st = (st >> 16) + (st & 0xFFFF);
+                uint16_t cs_tcp = ~st & 0xFFFF;
+                p[off+36] = cs_tcp >> 8;
+                p[off+37] = cs_tcp & 0xFF;
+            }
+            /* UDP checksum stays 0 (optional in IPv4) */
 
-            //sock raw PRECISA do endereço, bug
+            //sock raw PRECISA do endereço
             if (unlikely(!use_afp)) {
                 addrs[i].sin_addr.s_addr = htonl(ip_int);
             }
+            batch_count++;
         }
 
         /* send batch */
-        int ret = sendmmsg(sockfd, msgs, eff_batch, 0);
-        if (likely(ret > 0)) {
-            __atomic_fetch_add(pps_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
-            __atomic_fetch_add(sent_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
+        {
+            int sent = 0;
+            while (sent < batch_count) {
+                int ret = sendmmsg(sockfd, msgs + sent, batch_count - sent, 0);
+                if (likely(ret > 0)) {
+                    __atomic_fetch_add(pps_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
+                    __atomic_fetch_add(sent_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
+                    sent += ret;
+                } else break;
+            }
         }
+        continue;
+
+flush:
+        /* parcial send do batch e sair */
+        {
+            int sent = 0;
+            while (sent < batch_count) {
+                int ret = sendmmsg(sockfd, msgs + sent, batch_count - sent, 0);
+                if (likely(ret > 0)) {
+                    __atomic_fetch_add(pps_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
+                    __atomic_fetch_add(sent_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
+                    sent += ret;
+                } else break;
+            }
+        }
+        goto done;
     }
 
 done:

@@ -4,13 +4,15 @@ import sys
 import time
 import json
 import os
+from datetime import datetime
 from rich.console import Console
 from REEcanner.utils import parse_ports_list, BlacklistManager, InclusionManager
+from REEcanner.ports import get_top_ports
 from REEcanner.scanner import Scanner
 
 def main():
     parser = argparse.ArgumentParser(description="reecanner - fast ip/port scout")
-    parser.add_argument("target", nargs="?", help="target cidr (e.g., 45.0.0.0/8)")
+    parser.add_argument("target", nargs="?", help="target cidr (e.g., 45.0.0.0/8). use - for stdin")
     parser.add_argument("-b", "--blacklist-file", type=argparse.FileType('r'))
     parser.add_argument("-s", "--source-port", type=int, default=0)
     parser.add_argument("-p", "--ports", default="80")
@@ -32,15 +34,36 @@ def main():
     parser.add_argument("--shard-id", type=int, default=0, help="id of this shard (0 to shards-1)")
     parser.add_argument("--checkpoint", help="path to checkpoint file to resume scan")
     parser.add_argument("--batch-size", type=int, default=4096, help="number of IPs to scan in each batch")
+    # new features
+    parser.add_argument("--exclude", help="exclude IPs/CIDRs from scan (comma-separated)")
+    parser.add_argument("--top-ports", type=int, metavar="N", help="scan top N most common ports (nmap-style)")
+    parser.add_argument("--retries", type=int, default=1, help="number of times to retransmit each probe (default: 1)")
+    parser.add_argument("--resolve", action="store_true", help="reverse DNS resolve found IPs")
+    parser.add_argument("--banners", action="store_true", help="grab banners from discovered services")
+    parser.add_argument("--http-probe", action="store_true", help="HTTP probe open web ports (title, status, server)")
+    parser.add_argument("--vulns", action="store_true", help="search exploits via searchsploit for discovered services")
+    parser.add_argument("--udp", action="store_true", help="UDP scan mode instead of TCP SYN")
+    parser.add_argument("--adaptive", action="store_true", help="adaptive rate limiting based on send success")
+    parser.add_argument("-oJ", "--output-json", metavar="FILE", help="output results as JSON")
+    parser.add_argument("-oX", "--output-xml", metavar="FILE", help="output results as XML")
+    parser.add_argument("-oG", "--output-grep", metavar="FILE", help="output results as grepable format")
 
     args = parser.parse_args()
 
     console = Console(no_color=args.no_color)
-    try:
-        ports = parse_ports_list(args.ports)
-    except ValueError as e:
-        console.print(f"[bold red]error:[/bold red] {e}")
-        sys.exit(1)
+
+    # port selection: --top-ports overrides -p
+    if args.top_ports:
+        ports = get_top_ports(args.top_ports)
+        if not ports:
+            console.print("[bold red]error:[/bold red] no top ports available")
+            sys.exit(1)
+    else:
+        try:
+            ports = parse_ports_list(args.ports)
+        except ValueError as e:
+            console.print(f"[bold red]error:[/bold red] {e}")
+            sys.exit(1)
 
     if (args.rate_limit > 10000 or args.rate_limit == 0) and not args.override_safety:
         console.print("[bold red][!] error: scanning above 10,000 pps (or unlimited) requires explicit approval[/bold red]")
@@ -48,7 +71,13 @@ def main():
         sys.exit(1)
 
     inc_networks = []
-    if args.target: 
+    # stdin support: target="-" or piped stdin
+    if args.target == "-" or (args.target is None and not sys.stdin.isatty()):
+        for line in sys.stdin:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                inc_networks.append(line)
+    elif args.target:
         if args.target == "random": pass # compatibility with old syntax
         else: inc_networks.extend(args.target.split(","))
         
@@ -63,6 +92,9 @@ def main():
         for line in args.blacklist_file:
             line = line.strip()
             if line: bl_networks.append(line)
+    # inline exclude
+    if args.exclude:
+        bl_networks.extend(args.exclude.split(","))
 
     inc_mgr = InclusionManager(inc_networks if inc_networks else None, seed=args.seed)
     bl_mgr = BlacklistManager(include_recommended=not args.disable_recommended, allow_private=args.scan_private, custom_networks=bl_networks)
@@ -75,6 +107,9 @@ def main():
             console.print(f"[bold green][*][/bold green] resuming scan from index {start_index} via checkpoint")
         except Exception as e:
             console.print(f"[bold yellow][*][/bold yellow] could not read checkpoint file: {e}")
+    # --vulns precisa de banners pra funcionar
+    if args.vulns and not args.banners and not args.http_probe:
+        args.banners = True
 
     scanner = Scanner(
         ports=ports, rate_limit=args.rate_limit, blacklist_manager=bl_mgr,
@@ -82,11 +117,24 @@ def main():
         workers=args.workers, limit=args.limit, output_file=args.output, quiet=args.quiet,
         seed=args.seed, start_index=start_index, shards=args.shards, shard_id=args.shard_id,
         checkpoint_file=args.checkpoint, simple=args.simple,
-        batch_size=args.batch_size
+        batch_size=args.batch_size, retries=args.retries, resolve=args.resolve,
+        banners=args.banners, http_probe=args.http_probe, vulns=args.vulns,
+        udp=args.udp, adaptive=args.adaptive
     )
 
-    console.print(f"[bold green][*][/bold green] reecanner initialized. targeting [cyan]{len(ports)}[/cyan] ports.")
+    mode = "UDP" if args.udp else "SYN"
+    console.print(f"[bold green][*][/bold green] reecanner initialized. targeting [cyan]{len(ports)}[/cyan] ports. mode: [cyan]{mode}[/cyan]")
     console.print(f"[bold green][*][/bold green] workers: [cyan]{scanner.workers_count}[/cyan] | rate: [cyan]{args.rate_limit}[/cyan] pps | seed: [cyan]{scanner.seed}[/cyan]")
+    if args.retries > 1:
+        console.print(f"[bold green][*][/bold green] retries: [cyan]{args.retries}[/cyan]")
+    if args.banners or args.http_probe:
+        features = []
+        if args.banners: features.append("banners")
+        if args.http_probe: features.append("http-probe")
+        if args.vulns: features.append("vulns")
+        console.print(f"[bold green][*][/bold green] probes: [cyan]{', '.join(features)}[/cyan]")
+    if args.adaptive:
+        console.print(f"[bold green][*][/bold green] adaptive rate limiting [cyan]enabled[/cyan]")
     if args.shards > 1:
         console.print(f"[bold green][*][/bold green] sharding enabled: node [cyan]{args.shard_id}[/cyan] of [cyan]{args.shards}[/cyan]")
 
@@ -102,6 +150,31 @@ def main():
         console.print(f"  hosts found:  [green]{scanner.found_total}[/green]")
         if args.output:
             console.print(f"  results saved to: [italic]{args.output}[/italic]")
+        # output formats
+        results = scanner.get_results()
+        if args.output_json:
+            with open(args.output_json, 'w') as f:
+                json.dump({"scan": {"time": datetime.now().isoformat(), "duration": f"{duration:.2f}s", "ports": ports, "total_found": scanner.found_total}, "hosts": results}, f, indent=2)
+            console.print(f"  json saved to: [italic]{args.output_json}[/italic]")
+        if args.output_xml:
+            with open(args.output_xml, 'w') as f:
+                f.write('<?xml version="1.0"?>\n<reecanner>\n')
+                f.write(f'  <scan time="{datetime.now().isoformat()}" duration="{duration:.2f}s" ports="{len(ports)}" found="{scanner.found_total}"/>\n')
+                for r in results:
+                    attrs = ' '.join(f'{k}="{v}"' for k, v in r.items() if isinstance(v, (str, int)))
+                    f.write(f'  <host {attrs}/>\n')
+                f.write('</reecanner>\n')
+            console.print(f"  xml saved to: [italic]{args.output_xml}[/italic]")
+        if args.output_grep:
+            with open(args.output_grep, 'w') as f:
+                f.write(f"# reecanner scan {datetime.now().isoformat()}\n")
+                for r in results:
+                    os_info = r.get('os', '')
+                    svc = r.get('service', '')
+                    hostname = r.get('hostname', '')
+                    extra = [x for x in [os_info, svc, hostname] if x]
+                    f.write(f"Host: {r['ip']} Port: {r['port']}/open/tcp {' '.join(extra)}\n")
+            console.print(f"  grepable saved to: [italic]{args.output_grep}[/italic]")
 
 if __name__ == "__main__":
     main()
