@@ -28,7 +28,19 @@ def get_service_name(port):
     entries = db.get(str(port), [])
     for entry in entries:
         if entry.get('tcp', False):
-            return entry.get('description', '')
+            desc = entry.get('description', '')
+            if not desc:
+                return ''
+            import re
+            m = re.search(r'\(([A-Z][A-Z0-9/]+)\)', desc)
+            if m:
+                return m.group(1)
+            parts = re.split(r'[–—\-â€"]', desc)[0].strip()
+            parts = re.split(r'\b(?:alternate|commonly|used for)\b', parts, flags=re.I)[0].strip()
+            words = parts.split()
+            if len(words) > 3:
+                return ' '.join(words[:3])
+            return parts
     return ''
 
 def get_top_ports(n):

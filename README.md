@@ -22,18 +22,39 @@ scan stats
   hosts found:  1101
 ```
 
-## Building
+## Installation
 
 Requires Linux, root privileges, Python 3.9+, GCC, and the `rich` module.
+
+### Arch Linux (AUR)
+
+If you are using Arch Linux, you can install REEcanner directly from the AUR using your favorite helper:
+
+```
+$ yay -S reecanner-git
+```
+
+### Global Installation (Pipx)
+
+To install globally so it is available in your PATH for `sudo`, we recommend using `pipx` with the `--global` flag. This automatically compiles the C worker and sets up the tool.
+
+```
+$ git clone https://github.com/RshaCuDeVidro/REEcanner.git
+$ cd REEcanner
+$ sudo pipx install --global .
+```
+
+### From Source (Manual)
+
+If you just want to run it from the folder without installing it to your system:
 
 ```
 $ pip install rich
 $ make
+$ sudo python3 main.py [options]
 ```
 
-Running `make` compiles the C packet engine (`worker.so`). Without it, the
-scanner falls back to a pure Python implementation at roughly 5x lower
-throughput.
+Running `make` compiles the high-performance C packet engine (`worker.so`). Without it, the scanner falls back to a pure Python implementation at roughly 5x lower throughput.
 
 ## Usage
 
@@ -51,15 +72,19 @@ TARGET SELECTION
   target                      CIDR(s) to scan (e.g. 45.0.0.0/8)
   -i, --include CIDR[,CIDR]  additional CIDRs to include
   --include-file FILE         include CIDRs from file, one per line
+  --exclude CIDR[,CIDR]       exclude IPs/CIDRs from scan (comma-separated)
 
 PORT SELECTION
   -p, --ports PORTS           ports to scan (default: 80)
                               accepts ranges: 80,443,8000-9000
+  --top-ports N               scan top N most common ports (nmap-style)
 
 RATE CONTROL
   -r, --rate-limit PPS        packets per second (default: 1000, 0=unlimited)
+  --adaptive                  adaptive rate limiting based on send success
   --override-safety           required for rates above 10,000 pps
   --batch-size N              packets per sendmmsg call (default: 4096)
+  --retries N                 number of times to retransmit each probe (default: 1)
 
 SCAN CONTROL
   -w, --workers N             worker processes (default: cpu count)
@@ -67,16 +92,27 @@ SCAN CONTROL
   -s, --source-port PORT      fixed source port for SYN packets
   --seed N                    feistel seed for deterministic ordering
   --index N                   start from this permutation index
+  --udp                       UDP scan mode instead of TCP SYN
 
 EXCLUSIONS
   -b, --blacklist-file FILE   CIDRs to exclude, one per line
   -d, --disable-recommended   remove built-in blacklist (military, etc)
   --scan-private              include RFC1918 and reserved ranges
 
+PROBING & RESOLUTION
+  --resolve                   reverse DNS resolve found IPs
+  --banners                   grab banners from discovered services
+  --http-probe                HTTP probe open web ports (title, status, server)
+  --vulns                     search exploits via searchsploit for discovered services
+
 OUTPUT
   -o, --output FILE           write results as JSON lines
+  -oJ, --output-json FILE     output results as JSON
+  -oX, --output-xml FILE      output results as XML
+  -oG, --output-grep FILE     output results as grepable format
   -q, --quiet                 suppress per-host output, show only stats
   --simple                    output IP or IP:PORT to stdout (for piping)
+  --no-port                   omit port from output (just show IP)
   --no-color                  disable ANSI color codes
 
 DISTRIBUTED SCANNING
@@ -179,6 +215,18 @@ Scan all common ports on a single target range:
 ```
 $ sudo python3 main.py 10.0.0.0/16 -p 21-25,53,80,110,143,443,993,995,3306,3389,5432,8080,8443 \
     --scan-private -r 5000
+```
+
+UDP scan for DNS servers (using `--top-ports` or `-p 53`):
+
+```
+$ sudo python3 main.py 0.0.0.0/0 -p 53 --udp -r 100000 --override-safety
+```
+
+Service Discovery and Vulnerability Scanning (Requires `--banners` or `--vulns`):
+
+```
+$ sudo python3 main.py 192.168.1.0/24 -p 80,443,22 --banners --http-probe --vulns --resolve
 ```
 
 ## Distributed Scanning
@@ -297,6 +345,10 @@ REEcanner/
   scanner.py         Scanner class, sniffer, process management
   utils.py           FeistelShuffler, BlacklistManager, InclusionManager
   packet.py          packet parsing utilities
+  ports.py           Top ports definitions
+  probes.py          Service banners and HTTP probes
+  fingerprint.py     Service detection and vulnerabilty lookups
+  vulns.py           Vulnerability checking against searchsploit
 ```
 
 ## Legal

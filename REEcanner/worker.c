@@ -218,7 +218,7 @@ void run_worker(
         }
     }
 
-    //rate limit — ajusta batch pra manter intervalos ~100ms
+    //rate limit 
     int eff_batch = batch_size;
     if (rate_limit > 0) {
         int max_for_rate = (rate_limit + 9) / 10;  // ~100ms worth of packets
@@ -261,7 +261,6 @@ void run_worker(
             uint32_t ip_int;
             int attempts = 0;
 
-            // gerar ip publico valido
             for (;;) {
                 if (unlikely((uint64_t)cur_idx >= total_work)) goto flush;
                 if (unlikely(shards > 1 && (cur_idx % shards) != shard_id)) {
@@ -276,9 +275,8 @@ void run_worker(
                 if (unlikely(!*run_flag)) goto done;
             }
 
-            // xorshift64 port select
-            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-            uint16_t port = ports[rng % ports_len];
+            uint32_t port_idx = (uint32_t)((uint64_t)cur_idx / total_ips) % ports_len;
+            uint16_t port = ports[port_idx];
 
             // packet pointer
             uint8_t *p = batch_buf + (size_t)i * pkt_len;
@@ -299,7 +297,7 @@ void run_worker(
             p[off+18] = (ip_int >> 8) & 0xFF;
             p[off+19] = ip_int & 0xFF;
 
-            // dst port (same offset for both TCP and UDP)
+            // dst port 
             p[off+22] = port >> 8;
             p[off+23] = port & 0xFF;
 

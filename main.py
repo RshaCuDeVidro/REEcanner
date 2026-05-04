@@ -28,13 +28,13 @@ def main():
     parser.add_argument("--index", type=int, default=0, help="start index for the scan")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
-    parser.add_argument("--simple", action="store_true", help="output only IP:PORT to stdout (useful for piping)")
+    parser.add_argument("--simple", action="store_true", help="bare IP or IP:PORT output for piping (no OS, no service)")
+    parser.add_argument("--no-port", action="store_true", help="omit port from output (just show IP)")
     parser.add_argument("--override-safety", action="store_true", help="acknowledge risks and allow rate limits > 10000 pps")
     parser.add_argument("--shards", type=int, default=1, help="total number of shards for distributed scanning")
     parser.add_argument("--shard-id", type=int, default=0, help="id of this shard (0 to shards-1)")
     parser.add_argument("--checkpoint", help="path to checkpoint file to resume scan")
     parser.add_argument("--batch-size", type=int, default=4096, help="number of IPs to scan in each batch")
-    # new features
     parser.add_argument("--exclude", help="exclude IPs/CIDRs from scan (comma-separated)")
     parser.add_argument("--top-ports", type=int, metavar="N", help="scan top N most common ports (nmap-style)")
     parser.add_argument("--retries", type=int, default=1, help="number of times to retransmit each probe (default: 1)")
@@ -50,7 +50,7 @@ def main():
 
     args = parser.parse_args()
 
-    console = Console(no_color=args.no_color)
+    console = Console(no_color=args.no_color, stderr=args.simple)
 
     # port selection: --top-ports overrides -p
     if args.top_ports:
@@ -119,7 +119,7 @@ def main():
         checkpoint_file=args.checkpoint, simple=args.simple,
         batch_size=args.batch_size, retries=args.retries, resolve=args.resolve,
         banners=args.banners, http_probe=args.http_probe, vulns=args.vulns,
-        udp=args.udp, adaptive=args.adaptive
+        udp=args.udp, adaptive=args.adaptive, no_port=args.no_port
     )
 
     mode = "UDP" if args.udp else "SYN"

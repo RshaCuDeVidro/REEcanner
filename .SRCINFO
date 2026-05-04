@@ -1,0 +1,16 @@
+pkgbase = reecanner-git
+	pkgdesc = Fast TCP/UDP network scanner build with python and C worker, identify vulns with searchsploit. shodan like
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/RshaCuDeVidro/REEcanner
+	arch = x86_64
+	license = MIT
+	makedepends = git
+	makedepends = make
+	makedepends = python-setuptools
+	depends = python
+	depends = python-rich
+	source = git+https://github.com/RshaCuDeVidro/REEcanner.git
+	md5sums = SKIP
+
+pkgname = reecanner-git

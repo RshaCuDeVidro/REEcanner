@@ -147,25 +147,38 @@ class ProbeEngine:
             elif self.do_banners:
                 banner = banner_grab(ip, port, self.timeout)
                 if banner:
-                    first_line = banner.split('\n')[0].strip()[:200]
-                    result['banner'] = first_line
                     banner_text = banner
+                    first_line = banner.split('\n')[0].strip()[:200]
+                    # extract Server header from HTTP-like responses
+                    server_match = re.search(r'^[Ss]erver:\s*(.+)$', banner, re.M)
+                    if server_match:
+                        server_header = server_match.group(1).strip()
+                        display = f"{first_line} ({server_header})"
+                    else:
+                        display = first_line
+                    result['banner'] = display
                     if not self.quiet and not self.simple:
-                        sys.stdout.write(f"\r\033[K  {self.C}banner{self.E} {ip}:{port} — {first_line}\n")
+                        sys.stdout.write(f"\r\033[K  {self.C}banner{self.E} {ip}:{port} — {display}\n")
                         sys.stdout.flush()
             
             # vuln lookup via searchsploit
             if self.do_vulns and (banner_text or server_header):
                 try:
-                    from REEcanner.vulns import lookup_vulns
+                    from REEcanner.vulns import lookup_vulns, parse_banner
+                    parsed_name = None
+                    if server_header:
+                        parsed_name = parse_banner(server_header, port)
+                    if not parsed_name and banner_text:
+                        parsed_name = parse_banner(banner_text, port)
+                    
                     exploits = lookup_vulns(banner_text, port=port, server=server_header)
                     if exploits:
                         result['exploits'] = exploits
                         if not self.quiet and not self.simple:
-                            sys.stdout.write(f"\r\033[K  {self.R}\u2500\u2500 vulns{self.E} {self.B}{ip}:{port}{self.E}\n")
-                            for ex in exploits:
-                                cve = f" {self.Y}{ex['cve']}{self.E}" if 'cve' in ex else ""
-                                sys.stdout.write(f"\r\033[K     {self.R}\u2022{self.E} {ex['id']}{cve} {self.D}{ex['title']}{self.E}\n")
+                            label = f" ({parsed_name})" if parsed_name else ""
+                            ids = ", ".join(ex.get('id', '') for ex in exploits[:3])
+                            extra = f" +{len(exploits)-3} more" if len(exploits) > 3 else ""
+                            sys.stdout.write(f"\r\033[K  {self.R}vulns{self.E} {ip}:{port}{label} -> {ids}{extra}\n")
                             sys.stdout.flush()
                 except: pass
             

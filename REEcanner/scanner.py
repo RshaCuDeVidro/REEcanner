@@ -134,8 +134,8 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
     get_ip = inc_mgr.get_random_ip_int
     is_pub = bl_mgr.is_ip_int_public
     total_ips = inc_mgr.total_ips
-    total_work = total_ips * retries
     ports_len = len(ports)
+    total_work = total_ips * ports_len * retries
     # dynamic eff_batch pra manter intervalo ~100ms
     eff_batch = batch_size
     if rate_limit > 0:
@@ -145,17 +145,28 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
     next_t = time.perf_counter()
     batch_msgs = []
     off = 14 if iface else 0
-    pkt_len = 54 if iface else 40
+    if is_udp:
+        udp_payload = b"\x13\x37\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x06google\x03com\x00\x00\x01\x00\x01"
+        payload_len = 28 + len(udp_payload)
+        pkt_len = off + payload_len
+    else:
+        payload_len = 40
+        pkt_len = off + payload_len
+        
     if iface:
         g_mac_bytes = bytes.fromhex(g_mac.replace(':',''))
         l_mac_bytes = bytes.fromhex(l_mac.replace(':',''))
     for _ in range(eff_batch):
         buf = bytearray(pkt_len)
         if iface: _pack_into('!6s6sH', buf, 0, g_mac_bytes, l_mac_bytes, 0x0800)
-        _pack_into('!BBHHHBB', buf, off, 0x45, 0, 40, 54321, 0, 64, 6)
+        _pack_into('!BBHHHBB', buf, off, 0x45, 0, payload_len, 54321, 0, 64, 17 if is_udp else 6)
         _pack_into('!4s', buf, off+12, local_ip_bytes)
         _pack_into('!H', buf, off+20, src_port)
-        _pack_into('!BBH', buf, off+32, 0x50, 2, 5840)
+        if is_udp:
+            _pack_into('!HH', buf, off+24, 8 + len(udp_payload), 0)
+            buf[off+28:off+28+len(udp_payload)] = udp_payload
+        else:
+            _pack_into('!BBH', buf, off+32, 0x50, 2, 5840)
         batch_msgs.append([buf, 0, None if iface else (None, 0)])
     while run_event.is_set():
         if interval > 0:
@@ -191,10 +202,8 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
                 if not run_event.is_set(): return
             if scan_done: break
 
-            rng_state = (rng_state ^ (rng_state << 13)) & 0xFFFFFFFFFFFFFFFF
-            rng_state = (rng_state ^ (rng_state >> 7)) & 0xFFFFFFFFFFFFFFFF
-            rng_state = (rng_state ^ (rng_state << 17)) & 0xFFFFFFFFFFFFFFFF
-            port = ports[rng_state % ports_len]
+            port_idx = (current_index // total_ips) % ports_len
+            port = ports[port_idx]
             
             buf = batch_msgs[i][0]
             ip_hi, ip_lo = ip_int >> 16, ip_int & 0xFFFF
@@ -217,9 +226,12 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
             buf[off+22] = port >> 8
             buf[off+23] = port & 0xFF
             
-            cs_tcp = ~s_tcp & 0xFFFF
-            buf[off+36] = cs_tcp >> 8
-            buf[off+37] = cs_tcp & 0xFF
+            if is_udp:
+                pass 
+            else:
+                cs_tcp = ~s_tcp & 0xFFFF
+                buf[off+36] = cs_tcp >> 8
+                buf[off+37] = cs_tcp & 0xFF
             
             if not iface: 
                 batch_msgs[i][2] = (f"{(ip_int>>24)&255}.{(ip_int>>16)&255}.{(ip_int>>8)&255}.{ip_int&255}", 0)
@@ -254,7 +266,7 @@ def output_writer(q: queue.Queue, filepath: str):
             f.write("".join(buffer))
             f.flush()
 
-def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_color, limit, simple=False, run_flag=None, sniffer_ready=None, resolve=False, results_list=None, probe_queue=None, udp=False):
+def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_color, limit, simple=False, run_flag=None, sniffer_ready=None, resolve=False, results_list=None, probe_queue=None, udp=False, no_port=False):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         if udp:
@@ -284,11 +296,11 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
             if _recvmmsg:
                 msgs = _recvmmsg(vlen, socket.MSG_DONTWAIT)
                 for data, _, _, _ in msgs:
-                    process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp)
+                    process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port)
             else:
                 sock.settimeout(0.1)
                 data, _ = sock.recvfrom(65535)
-                process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp)
+                process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port)
         except (socket.timeout, BlockingIOError): continue
         except: continue
         
@@ -296,32 +308,38 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
         q.put(None)
         writer_thread.join()
 
-def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G, B, E, run_event, limit, simple=False, resolve=False, results_list=None, probe_queue=None, udp=False):
+def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G, B, E, run_event, limit, simple=False, resolve=False, results_list=None, probe_queue=None, udp=False, no_port=False):
     iph_len = (data[0] & 0x0F) << 2
     if len(data) < iph_len + 8: return
     
     if udp:
-        # UDP response: dst port must match our src_port
         dp = (data[iph_len + 2] << 8) | data[iph_len + 3]
         if dp != src_port: return
-        sp = (data[iph_len] << 8) | data[iph_len + 1]  # remote source port = the open port
+        sp = (data[iph_len] << 8) | data[iph_len + 1]
         ip_int = (data[12] << 24) | (data[13] << 16) | (data[14] << 8) | data[15]
         host_key = (ip_int << 16) | sp
         if host_key in seen_hosts: return
         seen_hosts.add(host_key)
+        hit_limit = False
         with found_count.get_lock():
             found_count.value += 1
             if limit > 0 and found_count.value >= limit:
-                run_event.clear()
+                hit_limit = True
         ip_str = f"{data[12]}.{data[13]}.{data[14]}.{data[15]}"
         if not quiet:
             if simple:
-                sys.stdout.write(f"{ip_str}:{sp}\n")
+                sys.stdout.write(f"{ip_str}\n" if no_port else f"{ip_str}:{sp}\n")
             else:
-                sys.stdout.write(f"\r\033[K{B}{G}found{E} {ip_str}:{sp}/udp\n")
+                port_str = f":{sp}/udp" if not no_port else ""
+                sys.stdout.write(f"\r\033[K{ip_str:<16}{port_str}\n")
             sys.stdout.flush()
         if results_list is not None:
             results_list.append({'ip': ip_str, 'port': sp, 'proto': 'udp'})
+            
+        if hit_limit:
+            run_event.clear()
+            if run_flag is not None:
+                run_flag.value = 0
         return
     
     if len(data) < iph_len + 20: return
@@ -335,15 +353,14 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
             if host_key in seen_hosts: return
             seen_hosts.add(host_key)
             
+            hit_limit = False
             with found_count.get_lock():
                 found_count.value += 1
                 if limit > 0 and found_count.value >= limit:
-                    run_event.clear()
-                    if run_flag is not None:
-                        run_flag.value = 0
+                    hit_limit = True
             
             ip_str = f"{data[12]}.{data[13]}.{data[14]}.{data[15]}"
-            # OS fingerprint from TTL + window
+            # OS fingerprint
             ttl = data[8]
             window = (data[iph_len + 14] << 8) | data[iph_len + 15]
             try:
@@ -363,16 +380,17 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
             
             if not quiet:
                 if simple:
-                    if sp in (80, 443):
-                        sys.stdout.write(f"{ip_str}\n")
+                    out = f"{ip_str}\n" if no_port else f"{ip_str}:{sp}\n"
+                    if sys.stderr.isatty():
+                        sys.stdout.write(f"\r\033[K{out}")
                     else:
-                        sys.stdout.write(f"{ip_str}:{sp}\n")
+                        sys.stdout.write(out)
                 else:
-                    extra = ""
-                    if os_guess: extra += f" {os_guess}"
-                    if hostname: extra += f" ({hostname})"
-                    if svc: extra += f" [{svc}]"
-                    sys.stdout.write(f"\r\033[K{B}{G}found{E} {ip_str}:{sp}{extra}\n")
+                    port_str = f":{sp:<6}" if not no_port else ""
+                    parts = [f"{ip_str:<16}{port_str}"]
+                    if svc: parts.append(svc)
+                    if hostname: parts.append(f"({hostname})")
+                    sys.stdout.write(f"\r\033[K{'  '.join(parts)}\n")
                 sys.stdout.flush()
             if log_queue is not None:
                 entry = {"ip":ip_str,"port":sp,"time":datetime.now().isoformat()}
@@ -391,9 +409,14 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
             if probe_queue is not None:
                 try: probe_queue.put_nowait((ip_str, sp))
                 except: pass
+                
+            if hit_limit:
+                run_event.clear()
+                if run_flag is not None:
+                    run_flag.value = 0
 
 class Scanner:
-    def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False, batch_size=4096, retries=1, resolve=False, banners=False, http_probe=False, vulns=False, udp=False, adaptive=False):
+    def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False, batch_size=4096, retries=1, resolve=False, banners=False, http_probe=False, vulns=False, udp=False, adaptive=False, no_port=False):
         self.ports = ports
         self.rate_limit = rate_limit
         self.bl_mgr = blacklist_manager
@@ -428,7 +451,8 @@ class Scanner:
         self.vulns = vulns
         self.udp = udp
         self.adaptive = adaptive
-        self.total_work = self.inc_mgr.total_ips * self.retries
+        self.no_port = no_port
+        self.total_work = self.inc_mgr.total_ips * len(self.ports) * self.retries
         self.use_c = HAS_C_WORKER
         # shared results list for output formats
         self._results_manager = multiprocessing.Manager()
@@ -455,7 +479,7 @@ class Scanner:
             self.src_port, self.run_event, self.found_count, self.output_file,
             self.quiet, not console.no_color, self.limit, self.simple,
             self.run_flag, sniffer_ready, self.resolve, self._results_list,
-            self._probe_queue, self.udp
+            self._probe_queue, self.udp, self.no_port
         ))
         sniff_p.start()
         sniffer_ready.wait(timeout=5.0)  # esperar sniffer ficar pronto
@@ -496,9 +520,10 @@ class Scanner:
                     pct = min(100.0, sent_total / self.total_work * 100) if self.total_work > 0 else 100.0
                     filled = int(pct / 5)
                     bar = '█' * filled + '░' * (20 - filled)
-                    sys.stderr.write(f"\r[{bar}] {pct:5.1f}% | {sent_fmt} sent | found: {found_total}\033[K\n")
-                    sys.stderr.write(f"[*] scan complete, waiting {grace_period:.0f}s for responses...\n")
-                    sys.stderr.flush()
+                    if not self.simple and not self.quiet:
+                        sys.stderr.write(f"\r[{bar}] {pct:5.1f}% | {sent_fmt} sent | found: {found_total}\033[K\n")
+                        sys.stderr.write(f"[*] scan complete, waiting {grace_period:.0f}s for responses...\n")
+                        sys.stderr.flush()
                 
                 if grace_start and (time.time() - grace_start >= grace_period):
                     break
@@ -537,8 +562,9 @@ class Scanner:
                             eta_str = f" | eta: {eta_s:.0f}s"
                     else:
                         eta_str = ""
-                    sys.stderr.write(f"\r[{bar}] {pct:5.1f}% | {sent_fmt} sent @ {pps_fmt} pps | found: {found_total}{eta_str}\033[K")
-                    sys.stderr.flush()
+                    if not self.simple and not self.quiet:
+                        sys.stderr.write(f"\r[{bar}] {pct:5.1f}% | {sent_fmt} sent @ {pps_fmt} pps | found: {found_total}{eta_str}\033[K")
+                        sys.stderr.flush()
                 
                 # adaptive rate: adjust if actual << target
                 if self.adaptive and curr_pps > 0:
@@ -570,8 +596,9 @@ class Scanner:
         avg_pps = sent_total / total_duration if total_duration > 0 else 0
         sent_fmt = f"{sent_total:,}".replace(',', '.')
         pps_fmt = f"{avg_pps:,.0f}".replace(',', '.')
-        sys.stderr.write(f"\r[*] sent: {sent_fmt} | rate: {pps_fmt} pps | found: {self.found_count.value} | next index: {self.start_index + sent_total}\033[K\n")
-        sys.stderr.flush()
+        if not self.simple and not self.quiet:
+            sys.stderr.write(f"\r[*] sent: {sent_fmt} | rate: {pps_fmt} pps | found: {self.found_count.value} | next index: {self.start_index + sent_total}\033[K\n")
+            sys.stderr.flush()
 
         if self.checkpoint_file:
             try:
@@ -597,8 +624,84 @@ class Scanner:
                     p.terminate()
         except: pass
 
+        # rich summary table
+        if not self.quiet and not self.simple:
+            self._print_summary_table(console, probe_engine)
+
+    def _print_summary_table(self, console, probe_engine=None):
+        results = list(self._results_list)
+        if not results:
+            return
+        # merge probe data
+        probe_map = {}
+        if probe_engine and probe_engine.results:
+            for pr in probe_engine.results:
+                key = (pr.get('ip'), pr.get('port'))
+                probe_map[key] = pr
+        
+        from rich.table import Table
+        has_probes = bool(probe_map)
+        
+        table = Table(title="scan results", border_style="dim", show_lines=False, pad_edge=False)
+        table.add_column("IP", style="bold white", min_width=15)
+        table.add_column("Port", style="cyan", justify="right")
+        table.add_column("Service", style="green")
+        if has_probes:
+            table.add_column("Version", style="magenta")
+        
+        for r in results:
+            ip = r.get('ip', '')
+            port = str(r.get('port', ''))
+            proto = r.get('proto', 'tcp')
+            if proto == 'udp':
+                port += '/udp'
+            svc = r.get('service', '')
+            
+            row = [ip, port, svc]
+            
+            if has_probes:
+                key = (ip, r.get('port'))
+                pr = probe_map.get(key, {})
+                version = pr.get('server', '')
+                if not version and 'banner' in pr:
+                    version = pr['banner'][:50]
+                row.append(version)
+            
+            table.add_row(*row)
+        
+        console.print()
+        console.print(table)
+        
+        if has_probes:
+            vuln_hosts = []
+            for r in results:
+                key = (r.get('ip'), r.get('port'))
+                pr = probe_map.get(key, {})
+                exploits = pr.get('exploits', [])
+                if exploits:
+                    vuln_hosts.append((r, exploits))
+            
+            if vuln_hosts:
+                console.print()
+                vtable = Table(title="vulnerabilities", border_style="red", pad_edge=False)
+                vtable.add_column("Host", style="bold white")
+                vtable.add_column("ID", style="red")
+                vtable.add_column("CVE", style="yellow")
+                vtable.add_column("Title", style="dim")
+                
+                for r, exploits in vuln_hosts:
+                    host = f"{r.get('ip')}:{r.get('port')}"
+                    for ex in exploits:
+                        vtable.add_row(
+                            host,
+                            ex.get('id', ''),
+                            ex.get('cve', ''),
+                            ex.get('title', '')[:70]
+                        )
+                
+                console.print(vtable)
+
     def get_results(self):
-        """get collected scan results for output formats"""
         results = list(self._results_list)
         # merge probe results if available
         if hasattr(self, '_probe_engine_results'):
