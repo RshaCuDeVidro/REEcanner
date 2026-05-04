@@ -15,7 +15,7 @@ setup(
     author='rsha',
     py_modules=['main'],
     packages=['REEcanner'],
-    package_data={'REEcanner': ['worker.so']},
+    package_data={'REEcanner': ['worker.so', 'data/*']},
     include_package_data=True,
     install_requires=[
         'rich',
