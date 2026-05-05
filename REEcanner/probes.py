@@ -77,11 +77,12 @@ def http_probe(ip, port, timeout=5):
 HTTP_PORTS = {80, 443, 8080, 8443, 8000, 8888, 8008, 8081, 3000, 5000, 4443, 9443, 9090, 3001, 9000, 8001}
 
 class ProbeEngine:
-    """Runs banner/HTTP probes in background threads"""
-    def __init__(self, do_banners=False, do_http=False, do_vulns=False, use_color=True, quiet=False, simple=False, timeout=3):
+    """Runs banner/HTTP probes and DNS resolution in background threads"""
+    def __init__(self, do_banners=False, do_http=False, do_vulns=False, do_resolve=False, use_color=True, quiet=False, simple=False, timeout=3):
         self.do_banners = do_banners
         self.do_http = do_http
         self.do_vulns = do_vulns
+        self.do_resolve = do_resolve
         self.quiet = quiet
         self.simple = simple
         self.timeout = timeout
@@ -104,7 +105,7 @@ class ProbeEngine:
             self._workers.append(t)
 
     def submit(self, ip, port):
-        if not self.do_banners and not self.do_http and not self.do_vulns: return
+        if not self.do_banners and not self.do_http and not self.do_vulns and not self.do_resolve: return
         try: self.queue.put_nowait((ip, port))
         except: pass
 
@@ -127,6 +128,16 @@ class ProbeEngine:
             banner_text = None
             server_header = None
             
+            # DNS reverse resolution
+            if self.do_resolve:
+                try:
+                    hostname = socket.gethostbyaddr(ip)[0]
+                    result['hostname'] = hostname
+                    if not self.quiet and not self.simple:
+                        sys.stdout.write(f"\r\033[K  {self.G}resolve{self.E} {ip} — {hostname}\n")
+                        sys.stdout.flush()
+                except: pass
+
             # HTTP probe for web ports
             if self.do_http and port in HTTP_PORTS:
                 hr = http_probe(ip, port, self.timeout)

@@ -59,7 +59,7 @@ int is_public(uint32_t ip, const uint32_t *bl, int bl_len) {
         if (bl[mid] <= ip) lo = mid + 1; else hi = mid;
     }
     if (lo & 1) return 0;
-    if (lo < bl_len && bl[lo] == ip) return 0;
+    if (lo > 0 && bl[lo-1] == ip) return 0;
     return 1;
 }
 
@@ -130,8 +130,17 @@ void run_worker(
     //socket de verdade
     int sockfd, use_afp = (iface != NULL);
     int off = use_afp ? 14 : 0;
-    /* TCP = 20 IP + 20 TCP = 40,  UDP = 20 IP + 8 UDP = 28 */
-    int payload_len = is_udp ? 28 : 40;
+    
+    static const uint8_t dns_payload[] = {
+        0x13, 0x37, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x06, 'g', 'o', 'o',
+        'g', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
+        0x00, 0x01, 0x00, 0x01
+    };
+    int dns_len = sizeof(dns_payload);
+
+    /* TCP = 20 IP + 20 TCP = 40,  UDP = 20 IP + 8 UDP + payload */
+    int payload_len = is_udp ? (28 + dns_len) : 40;
     int pkt_len = off + payload_len;
 
     if (use_afp) {
@@ -190,12 +199,14 @@ void run_worker(
         memcpy(pkt + off + 12, src_ip, 4);        /* src ip */
 
         if (is_udp) {
-            // udp header: src_port, dst_port(set per-pkt), length=8, checksum=0
+            // udp header: src_port, dst_port(set per-pkt), length, checksum=0
             pkt[off+20] = src_port >> 8;
             pkt[off+21] = src_port & 0xFF;
             // dst port set per-packet at off+22,23
-            pkt[off+24] = 0; pkt[off+25] = 8;    /* udp length = 8 */
-            pkt[off+26] = 0; pkt[off+27] = 0;    /* checksum = 0 (optional in IPv4) */
+            uint16_t ulen = 8 + dns_len;
+            pkt[off+24] = ulen >> 8; pkt[off+25] = ulen & 0xFF;
+            pkt[off+26] = 0; pkt[off+27] = 0;    /* checksum = 0 */
+            memcpy(pkt + off + 28, dns_payload, dns_len);
         } else {
             // tcp header
             pkt[off+20] = src_port >> 8;
@@ -232,8 +243,11 @@ void run_worker(
     uint64_t next_t = now_ns();
 
     int64_t cur_idx = start_index + worker_id;
-    uint64_t rng = ((uint64_t)(worker_id + 1) * 0x9E3779B97F4A7C15ULL);
-    uint64_t total_work = total_ips * (uint64_t)retries;
+    uint64_t total_work = total_ips * (uint64_t)ports_len * (uint64_t)retries;
+
+    int64_t last_shuf_idx = -1;
+    uint32_t cached_ip = 0;
+    int cached_public = 0;
 
     // HOT LOOP
     while (likely(*run_flag)) {
@@ -267,15 +281,24 @@ void run_worker(
                     cur_idx += total_workers;
                     continue;
                 }
-                uint32_t shuf = fget((uint32_t)((uint64_t)cur_idx % total_ips), fkeys, total_ips, half_bits, feistel_mask);
-                ip_int = get_ip(shuf, net_bases, net_starts, nets_len, single_net);
+                
+                int64_t shuf_idx = (int64_t)(((uint64_t)cur_idx / ports_len) % total_ips);
+                if (shuf_idx != last_shuf_idx) {
+                    uint32_t shuf = fget((uint32_t)shuf_idx, fkeys, total_ips, half_bits, feistel_mask);
+                    cached_ip = get_ip(shuf, net_bases, net_starts, nets_len, single_net);
+                    cached_public = is_public(cached_ip, bl, bl_len);
+                    last_shuf_idx = shuf_idx;
+                }
+                
+                ip_int = cached_ip;
                 cur_idx += total_workers;
-                if (likely(is_public(ip_int, bl, bl_len))) break;
-                if (unlikely(++attempts > 2000)) { *run_flag = 0; goto done; }
+                if (likely(cached_public)) break;
+
+                if (unlikely(++attempts > 10000)) { *run_flag = 0; goto done; }
                 if (unlikely(!*run_flag)) goto done;
             }
 
-            uint32_t port_idx = (uint32_t)((uint64_t)cur_idx / total_ips) % ports_len;
+            uint32_t port_idx = (uint32_t)((uint64_t)(cur_idx - total_workers) % ports_len);
             uint16_t port = ports[port_idx];
 
             // packet pointer

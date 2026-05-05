@@ -47,6 +47,7 @@ def main():
     parser.add_argument("-oJ", "--output-json", metavar="FILE", help="output results as JSON")
     parser.add_argument("-oX", "--output-xml", metavar="FILE", help="output results as XML")
     parser.add_argument("-oG", "--output-grep", metavar="FILE", help="output results as grepable format")
+    parser.add_argument("-oS", "--output-sqlite", metavar="FILE", help="output results as a SQLite database")
 
     args = parser.parse_args()
 
@@ -99,6 +100,24 @@ def main():
     inc_mgr = InclusionManager(inc_networks if inc_networks else None, seed=args.seed)
     bl_mgr = BlacklistManager(include_recommended=not args.disable_recommended, allow_private=args.scan_private, custom_networks=bl_networks)
     
+    if not args.scan_private:
+        has_private = False
+        for net in inc_networks:
+            try:
+                # try as network
+                if ipaddress.ip_network(net, strict=False).is_private:
+                    has_private = True
+                    break
+            except:
+                try:
+                    # try as individual IP
+                    if ipaddress.ip_address(net).is_private:
+                        has_private = True
+                        break
+                except: pass
+        if has_private:
+            print("\033[93m[!] warning: private network targets detected. use --scan-private to include them.\033[0m")
+
     start_index = args.index
     if args.checkpoint and os.path.exists(args.checkpoint):
         try:
@@ -144,37 +163,64 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        duration = time.perf_counter() - start_t
-        console.print(f"\n[bold yellow]scan stats[/bold yellow]")
-        console.print(f"  time elapsed: [cyan]{duration:.2f}s[/cyan]")
-        console.print(f"  hosts found:  [green]{scanner.found_total}[/green]")
-        if args.output:
-            console.print(f"  results saved to: [italic]{args.output}[/italic]")
-        # output formats
-        results = scanner.get_results()
-        if args.output_json:
-            with open(args.output_json, 'w') as f:
-                json.dump({"scan": {"time": datetime.now().isoformat(), "duration": f"{duration:.2f}s", "ports": ports, "total_found": scanner.found_total}, "hosts": results}, f, indent=2)
-            console.print(f"  json saved to: [italic]{args.output_json}[/italic]")
-        if args.output_xml:
-            with open(args.output_xml, 'w') as f:
-                f.write('<?xml version="1.0"?>\n<reecanner>\n')
-                f.write(f'  <scan time="{datetime.now().isoformat()}" duration="{duration:.2f}s" ports="{len(ports)}" found="{scanner.found_total}"/>\n')
-                for r in results:
-                    attrs = ' '.join(f'{k}="{v}"' for k, v in r.items() if isinstance(v, (str, int)))
-                    f.write(f'  <host {attrs}/>\n')
-                f.write('</reecanner>\n')
-            console.print(f"  xml saved to: [italic]{args.output_xml}[/italic]")
-        if args.output_grep:
-            with open(args.output_grep, 'w') as f:
-                f.write(f"# reecanner scan {datetime.now().isoformat()}\n")
-                for r in results:
-                    os_info = r.get('os', '')
-                    svc = r.get('service', '')
-                    hostname = r.get('hostname', '')
-                    extra = [x for x in [os_info, svc, hostname] if x]
-                    f.write(f"Host: {r['ip']} Port: {r['port']}/open/tcp {' '.join(extra)}\n")
-            console.print(f"  grepable saved to: [italic]{args.output_grep}[/italic]")
+        try:
+            duration = time.perf_counter() - start_t
+            console.print(f"\n[bold yellow]scan stats[/bold yellow]")
+            console.print(f"  time elapsed: [cyan]{duration:.2f}s[/cyan]")
+            console.print(f"  hosts found:  [green]{scanner.found_total}[/green]")
+            if args.output:
+                console.print(f"  results saved to: [italic]{args.output}[/italic]")
+            # output formats
+            results = scanner.get_results()
+            if args.output_json:
+                with open(args.output_json, 'w') as f:
+                    json.dump({"scan": {"time": datetime.now().isoformat(), "duration": f"{duration:.2f}s", "ports": ports, "total_found": scanner.found_total}, "hosts": results}, f, indent=2)
+                console.print(f"  json saved to: [italic]{args.output_json}[/italic]")
+            if args.output_xml:
+                with open(args.output_xml, 'w') as f:
+                    f.write('<?xml version="1.0"?>\n<reecanner>\n')
+                    f.write(f'  <scan time="{datetime.now().isoformat()}" duration="{duration:.2f}s" ports="{len(ports)}" found="{scanner.found_total}"/>\n')
+                    for r in results:
+                        attrs = ' '.join(f'{k}="{v}"' for k, v in r.items() if isinstance(v, (str, int)))
+                        f.write(f'  <host {attrs}/>\n')
+                    f.write('</reecanner>\n')
+                console.print(f"  xml saved to: [italic]{args.output_xml}[/italic]")
+            if args.output_grep:
+                with open(args.output_grep, 'w') as f:
+                    f.write(f"# reecanner scan {datetime.now().isoformat()}\n")
+                    for r in results:
+                        os_info = r.get('os', '')
+                        svc = r.get('service', '')
+                        hostname = r.get('hostname', '')
+                        extra = [x for x in [os_info, svc, hostname] if x]
+                        f.write(f"Host: {r['ip']} Port: {r['port']}/open/tcp {' '.join(extra)}\n")
+                console.print(f"  grepable saved to: [italic]{args.output_grep}[/italic]")
+            if args.output_sqlite:
+                try:
+                    import sqlite3
+                    import json as json_mod
+                    conn = sqlite3.connect(args.output_sqlite)
+                    cursor = conn.cursor()
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS hosts 
+                                   (ip TEXT, port INTEGER, proto TEXT, service TEXT, hostname TEXT, 
+                                    os TEXT, banner TEXT, title TEXT, status INTEGER, server TEXT,
+                                    redirect TEXT, vulnerabilities TEXT)''')
+                    for r in results:
+                        vulns_json = json_mod.dumps(r.get('exploits', [])) if r.get('exploits') else None
+                        cursor.execute("""INSERT INTO hosts (ip, port, proto, service, hostname, os, banner, 
+                                                              title, status, server, redirect, vulnerabilities) 
+                                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                       (r.get('ip'), r.get('port'), r.get('proto'), r.get('service'), 
+                                        r.get('hostname'), r.get('os'), r.get('banner'), r.get('title'), 
+                                        r.get('status'), r.get('server'), r.get('redirect'), vulns_json))
+                    conn.commit()
+                    conn.close()
+                    console.print(f"  sqlite database saved to: [italic]{args.output_sqlite}[/italic]")
+                except Exception as e:
+                    console.print(f"[bold red]error saving sqlite:[/bold red] {e}")
+        except KeyboardInterrupt:
+            pass
+
 
 if __name__ == "__main__":
     main()

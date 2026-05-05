@@ -126,7 +126,6 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
     _pack_into = struct.pack_into
     _unpack = struct.unpack
     src_ip_words = _unpack("!HH", local_ip_bytes)
-    ip_static_sum = 0x4500 + 40 + 54321 + 0 + (64 << 8 | 6) + src_ip_words[0] + src_ip_words[1]
     
     current_index = start_index + worker_id
     rng_state = ((worker_id + 1) * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
@@ -153,6 +152,9 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
         payload_len = 40
         pkt_len = off + payload_len
         
+    ip_proto = 17 if is_udp else 6
+    ip_static_sum = 0x4500 + payload_len + 54321 + 0 + (64 << 8 | ip_proto) + src_ip_words[0] + src_ip_words[1]
+
     if iface:
         g_mac_bytes = bytes.fromhex(g_mac.replace(':',''))
         l_mac_bytes = bytes.fromhex(l_mac.replace(':',''))
@@ -192,7 +194,7 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
                     current_index += total_workers
                     continue
                     
-                ip_int, _ = get_ip(current_index)
+                ip_int, _ = get_ip(current_index // ports_len)
                 current_index += total_workers
                 if is_pub(ip_int): break
                 attempts += 1
@@ -202,7 +204,7 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
                 if not run_event.is_set(): return
             if scan_done: break
 
-            port_idx = (current_index // total_ips) % ports_len
+            port_idx = (current_index - total_workers) % ports_len
             port = ports[port_idx]
             
             buf = batch_msgs[i][0]
@@ -274,6 +276,37 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
         else:
             sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64*1024*1024)
+        
+        # BPF Filter: kernel-level filtering of SYN-ACKs for our src_port
+        # This prevents Python from even seeing unrelated traffic.
+        try:
+            import struct
+            if udp:
+                # UDP: dst port at offset 22
+                bpf_insns = [
+                    struct.pack('HHIB', 0x28, 0, 0, 22),       # ldh [22]
+                    struct.pack('HHIB', 0x15, 0, 1, src_port), # jeq src_port, K, D
+                    struct.pack('HHIB', 0x06, 0, 0, 0x00040000), # K: ret 0x40000
+                    struct.pack('HHIB', 0x06, 0, 0, 0)          # D: ret 0
+                ]
+            else:
+                # TCP: dst port at offset 22, flags at offset 33
+                bpf_insns = [
+                    struct.pack('HHIB', 0x28, 0, 0, 22),       # ldh [22]
+                    struct.pack('HHIB', 0x15, 0, 4, src_port), # jeq src_port, NEXT, DROP
+                    struct.pack('HHIB', 0x30, 0, 0, 33),       # ldb [33]
+                    struct.pack('HHIB', 0x54, 0, 0, 0x12),     # and 0x12
+                    struct.pack('HHIB', 0x15, 0, 1, 0x12),     # jeq 0x12, KEEP, DROP
+                    struct.pack('HHIB', 0x06, 0, 0, 0x00040000), # KEEP: ret 0x40000
+                    struct.pack('HHIB', 0x06, 0, 0, 0)          # DROP: ret 0
+                ]
+            bpf_program = b''.join(bpf_insns)
+            fprog = struct.pack('HL', len(bpf_insns), struct.unpack('L', struct.pack('P', bpf_program))[0])
+            # SO_ATTACH_FILTER = 26
+            sock.setsockopt(socket.SOL_SOCKET, 26, fprog)
+        except Exception as e:
+            pass # fallback to software filtering if BPF fails
+            
     except:
         if sniffer_ready: sniffer_ready.set()
         return
@@ -283,7 +316,7 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
     _recvmmsg = getattr(sock, 'recvmmsg', None)
     G, B, E = ("\033[92m", "\033[1m", "\033[0m") if use_color else ("", "", "")
     seen_hosts = set()
-    vlen = 256
+    vlen = 512 # increased batch size
     
     q = queue.Queue(maxsize=100_000)
     writer_thread = None
@@ -294,14 +327,20 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
     while run_event.is_set():
         try:
             if _recvmmsg:
+                # MSG_DONTWAIT prevents blocking
                 msgs = _recvmmsg(vlen, socket.MSG_DONTWAIT)
+                if not msgs:
+                    time.sleep(0.01)
+                    continue
                 for data, _, _, _ in msgs:
                     process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port)
             else:
                 sock.settimeout(0.1)
                 data, _ = sock.recvfrom(65535)
                 process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port)
-        except (socket.timeout, BlockingIOError): continue
+        except (socket.timeout, BlockingIOError): 
+            time.sleep(0.01)
+            continue
         except: continue
         
     if writer_thread:
@@ -367,11 +406,7 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
                 from REEcanner.fingerprint import guess_os
                 os_guess = guess_os(ttl, window)
             except: os_guess = ""
-            # reverse DNS
-            hostname = ""
-            if resolve:
-                try: hostname = socket.gethostbyaddr(ip_str)[0]
-                except: pass
+            
             # service name
             try:
                 from REEcanner.ports import get_service_name
@@ -389,12 +424,10 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
                     port_str = f":{sp:<6}" if not no_port else ""
                     parts = [f"{ip_str:<16}{port_str}"]
                     if svc: parts.append(svc)
-                    if hostname: parts.append(f"({hostname})")
                     sys.stdout.write(f"\r\033[K{'  '.join(parts)}\n")
                 sys.stdout.flush()
             if log_queue is not None:
                 entry = {"ip":ip_str,"port":sp,"time":datetime.now().isoformat()}
-                if hostname: entry["hostname"] = hostname
                 if svc: entry["service"] = svc
                 if os_guess: entry["os"] = os_guess
                 log_queue.put(json.dumps(entry)+"\n")
@@ -457,7 +490,7 @@ class Scanner:
         # shared results list for output formats
         self._results_manager = multiprocessing.Manager()
         self._results_list = self._results_manager.list()
-        self._probe_queue = self._results_manager.Queue() if (banners or http_probe) else None
+        self._probe_queue = self._results_manager.Queue() if (banners or http_probe or resolve) else None
 
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -469,9 +502,9 @@ class Scanner:
     def run(self, console):
         # start probe engine if needed
         probe_engine = None
-        if self.banners or self.http_probe or self.vulns:
+        if self.banners or self.http_probe or self.vulns or self.resolve:
             from REEcanner.probes import ProbeEngine
-            probe_engine = ProbeEngine(do_banners=self.banners, do_http=self.http_probe, do_vulns=self.vulns, use_color=not console.no_color, quiet=self.quiet, simple=self.simple)
+            probe_engine = ProbeEngine(do_banners=self.banners, do_http=self.http_probe, do_vulns=self.vulns, do_resolve=self.resolve, use_color=not console.no_color, quiet=self.quiet, simple=self.simple)
             probe_engine.start()
         
         sniffer_ready = multiprocessing.Event()
@@ -588,7 +621,7 @@ class Scanner:
                 except: break
             # wait for probes to finish
             import time as _t
-            _t.sleep(1)
+            _t.sleep(2)
             probe_engine.stop()
         
         total_duration = time.time() - start_time
@@ -626,7 +659,13 @@ class Scanner:
 
         # rich summary table
         if not self.quiet and not self.simple:
-            self._print_summary_table(console, probe_engine)
+            try:
+                self._print_summary_table(console, probe_engine)
+            except KeyboardInterrupt:
+                pass
+        
+        if probe_engine:
+            self._probe_engine_results = list(probe_engine.results)
 
     def _print_summary_table(self, console, probe_engine=None):
         results = list(self._results_list)
@@ -700,6 +739,8 @@ class Scanner:
                         )
                 
                 console.print(vtable)
+            elif self.vulns:
+                console.print("\n[bold yellow][*][/bold yellow] no known vulnerabilities found for captured banners")
 
     def get_results(self):
         results = list(self._results_list)

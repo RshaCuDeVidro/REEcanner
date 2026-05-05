@@ -171,6 +171,6 @@ class BlacklistManager:
         idx = bisect.bisect_right(self._flat_ranges, ip_int)
         if idx % 2 == 1:
             return False
-        if idx < len(self._flat_ranges) and self._flat_ranges[idx] == ip_int:
+        if idx > 0 and self._flat_ranges[idx-1] == ip_int:
             return False
         return True
