@@ -168,10 +168,13 @@ def main():
             console.print(f"\n[bold yellow]scan stats[/bold yellow]")
             console.print(f"  time elapsed: [cyan]{duration:.2f}s[/cyan]")
             console.print(f"  hosts found:  [green]{scanner.found_total}[/green]")
-            if args.output:
-                console.print(f"  results saved to: [italic]{args.output}[/italic]")
             # output formats
             results = scanner.get_results()
+            if args.output:
+                with open(args.output, 'w') as f:
+                    for r in results:
+                        f.write(json.dumps(r) + "\n")
+                console.print(f"  results saved to (json lines): [italic]{args.output}[/italic]")
             if args.output_json:
                 with open(args.output_json, 'w') as f:
                     json.dump({"scan": {"time": datetime.now().isoformat(), "duration": f"{duration:.2f}s", "ports": ports, "total_found": scanner.found_total}, "hosts": results}, f, indent=2)
@@ -181,7 +184,12 @@ def main():
                     f.write('<?xml version="1.0"?>\n<reecanner>\n')
                     f.write(f'  <scan time="{datetime.now().isoformat()}" duration="{duration:.2f}s" ports="{len(ports)}" found="{scanner.found_total}"/>\n')
                     for r in results:
-                        attrs = ' '.join(f'{k}="{v}"' for k, v in r.items() if isinstance(v, (str, int)))
+                        # flatten vulns for XML
+                        r_copy = r.copy()
+                        if 'exploits' in r_copy:
+                            r_copy['vulns_count'] = len(r_copy['exploits'])
+                            del r_copy['exploits']
+                        attrs = ' '.join(f'{k}="{str(v).replace(chr(34), chr(39))}"' for k, v in r_copy.items() if isinstance(v, (str, int)))
                         f.write(f'  <host {attrs}/>\n')
                     f.write('</reecanner>\n')
                 console.print(f"  xml saved to: [italic]{args.output_xml}[/italic]")
@@ -192,8 +200,9 @@ def main():
                         os_info = r.get('os', '')
                         svc = r.get('service', '')
                         hostname = r.get('hostname', '')
-                        extra = [x for x in [os_info, svc, hostname] if x]
-                        f.write(f"Host: {r['ip']} Port: {r['port']}/open/tcp {' '.join(extra)}\n")
+                        banner = r.get('banner', '')
+                        extra = [x for x in [os_info, svc, hostname, banner] if x]
+                        f.write(f"Host: {r['ip']} Port: {r['port']}/open/tcp {' | '.join(extra)}\n")
                 console.print(f"  grepable saved to: [italic]{args.output_grep}[/italic]")
             if args.output_sqlite:
                 try:

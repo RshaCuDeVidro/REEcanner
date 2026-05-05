@@ -250,25 +250,7 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
         except: pass
         if scan_done: return
 
-def output_writer(q: queue.Queue, filepath: str):
-    buffer = []
-    with open(filepath, 'a') as f:
-        while True:
-            item = q.get()
-            if item is None:
-                break
-            
-            buffer.append(item)
-            if len(buffer) >= 1000:
-                f.write("".join(buffer))
-                f.flush()
-                buffer.clear()
-                
-        if buffer:
-            f.write("".join(buffer))
-            f.flush()
-
-def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_color, limit, simple=False, run_flag=None, sniffer_ready=None, resolve=False, results_list=None, probe_queue=None, udp=False, no_port=False):
+def sniffer_process(src_port, run_event, found_count, quiet, use_color, limit, simple=False, run_flag=None, sniffer_ready=None, resolve=False, results_list=None, probe_queue=None, udp=False, no_port=False):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         if udp:
@@ -318,12 +300,6 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
     seen_hosts = set()
     vlen = 512 # increased batch size
     
-    q = queue.Queue(maxsize=100_000)
-    writer_thread = None
-    if output_file:
-        writer_thread = threading.Thread(target=output_writer, args=(q, output_file), daemon=True)
-        writer_thread.start()
-    
     while run_event.is_set():
         try:
             if _recvmmsg:
@@ -334,21 +310,17 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
                     continue
                 for data, _, _, _ in msgs:
                     if not run_event.is_set(): break
-                    process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port, run_flag=run_flag)
+                    process_packet(data, src_port, seen_hosts, found_count, quiet, None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port, run_flag=run_flag)
             else:
                 sock.settimeout(0.1)
                 data, _ = sock.recvfrom(65535)
-                process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port, run_flag=run_flag)
+                process_packet(data, src_port, seen_hosts, found_count, quiet, None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port, run_flag=run_flag)
         except (socket.timeout, BlockingIOError): 
             time.sleep(0.01)
             continue
         except Exception as e:
             # print(f"DEBUG sniffer error: {e}") # helpful for debugging
             continue
-        
-    if writer_thread:
-        q.put(None)
-        writer_thread.join()
 
 def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G, B, E, run_event, limit, simple=False, resolve=False, results_list=None, probe_queue=None, udp=False, no_port=False, run_flag=None):
     if not run_event.is_set(): return
@@ -471,7 +443,6 @@ class Scanner:
         self.local_ip_bytes = socket.inet_aton(self.local_ip)
         self.workers_count = workers or multiprocessing.cpu_count()
         self.limit = limit
-        self.output_file = output_file
         self.quiet = quiet
         self.simple = simple
         self.run_event = multiprocessing.Event()
@@ -521,7 +492,7 @@ class Scanner:
         
         sniffer_ready = multiprocessing.Event()
         sniff_p = multiprocessing.Process(target=sniffer_process, args=(
-            self.src_port, self.run_event, self.found_count, self.output_file,
+            self.src_port, self.run_event, self.found_count,
             self.quiet, not console.no_color, self.limit, self.simple,
             self.run_flag, sniffer_ready, self.resolve, self._results_list,
             self._probe_queue, self.udp, self.no_port
@@ -636,6 +607,9 @@ class Scanner:
             _t.sleep(2)
             probe_engine.stop()
         
+        if probe_engine:
+            self._probe_engine_results = list(probe_engine.results)
+
         total_duration = time.time() - start_time
         sent_total = sum(self.sent_array)
         avg_pps = sent_total / total_duration if total_duration > 0 else 0
@@ -675,9 +649,6 @@ class Scanner:
                 self._print_summary_table(console, probe_engine)
             except KeyboardInterrupt:
                 pass
-        
-        if probe_engine:
-            self._probe_engine_results = list(probe_engine.results)
 
     def _print_summary_table(self, console, probe_engine=None):
         results = list(self._results_list)
