@@ -333,21 +333,32 @@ def sniffer_process(src_port, run_event, found_count, output_file, quiet, use_co
                     time.sleep(0.01)
                     continue
                 for data, _, _, _ in msgs:
-                    process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port)
+                    if not run_event.is_set(): break
+                    process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port, run_flag=run_flag)
             else:
                 sock.settimeout(0.1)
                 data, _ = sock.recvfrom(65535)
-                process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port)
+                process_packet(data, src_port, seen_hosts, found_count, quiet, q if output_file else None, G, B, E, run_event, limit, simple=simple, resolve=resolve, results_list=results_list, probe_queue=probe_queue, udp=udp, no_port=no_port, run_flag=run_flag)
         except (socket.timeout, BlockingIOError): 
             time.sleep(0.01)
             continue
-        except: continue
+        except Exception as e:
+            # print(f"DEBUG sniffer error: {e}") # helpful for debugging
+            continue
         
     if writer_thread:
         q.put(None)
         writer_thread.join()
 
-def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G, B, E, run_event, limit, simple=False, resolve=False, results_list=None, probe_queue=None, udp=False, no_port=False):
+def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G, B, E, run_event, limit, simple=False, resolve=False, results_list=None, probe_queue=None, udp=False, no_port=False, run_flag=None):
+    if not run_event.is_set(): return
+    
+    # Extra safety: check limit again before processing
+    if limit > 0 and found_count.value >= limit:
+        run_event.clear()
+        if run_flag is not None: run_flag.value = 0
+        return
+
     iph_len = (data[0] & 0x0F) << 2
     if len(data) < iph_len + 8: return
     
@@ -379,7 +390,7 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
             run_event.clear()
             if run_flag is not None:
                 run_flag.value = 0
-        return
+            return
     
     if len(data) < iph_len + 20: return
     dp = (data[iph_len + 2] << 8) | data[iph_len + 3]
@@ -447,6 +458,7 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
                 run_event.clear()
                 if run_flag is not None:
                     run_flag.value = 0
+                return
 
 class Scanner:
     def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False, batch_size=4096, retries=1, resolve=False, banners=False, http_probe=False, vulns=False, udp=False, adaptive=False, no_port=False):
@@ -669,6 +681,9 @@ class Scanner:
 
     def _print_summary_table(self, console, probe_engine=None):
         results = list(self._results_list)
+        if self.limit > 0:
+            results = results[:self.limit]
+            
         if not results:
             return
         # merge probe data
@@ -744,6 +759,9 @@ class Scanner:
 
     def get_results(self):
         results = list(self._results_list)
+        if self.limit > 0:
+            results = results[:self.limit]
+            
         # merge probe results if available
         if hasattr(self, '_probe_engine_results'):
             probe_map = {}
