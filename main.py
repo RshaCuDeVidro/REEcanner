@@ -4,6 +4,7 @@ import sys
 import time
 import json
 import os
+import ipaddress
 from datetime import datetime
 from rich.console import Console
 from REEcanner.utils import parse_ports_list, BlacklistManager, InclusionManager
@@ -119,10 +120,14 @@ def main():
             print("\033[93m[!] warning: private network targets detected. use --scan-private to include them.\033[0m")
 
     start_index = args.index
+    start_seed = args.seed
     if args.checkpoint and os.path.exists(args.checkpoint):
         try:
             with open(args.checkpoint, 'r') as f:
-                start_index = json.load(f).get("index", start_index)
+                ckpt_data = json.load(f)
+                start_index = ckpt_data.get("index", start_index)
+                if start_seed is None:
+                    start_seed = ckpt_data.get("seed")
             console.print(f"[bold green][*][/bold green] resuming scan from index {start_index} via checkpoint")
         except Exception as e:
             console.print(f"[bold yellow][*][/bold yellow] could not read checkpoint file: {e}")
@@ -134,7 +139,7 @@ def main():
         ports=ports, rate_limit=args.rate_limit, blacklist_manager=bl_mgr,
         inclusion_manager=inc_mgr, source_port=args.source_port if args.source_port > 0 else None,
         workers=args.workers, limit=args.limit, output_file=args.output, quiet=args.quiet,
-        seed=args.seed, start_index=start_index, shards=args.shards, shard_id=args.shard_id,
+        seed=start_seed, start_index=start_index, shards=args.shards, shard_id=args.shard_id,
         checkpoint_file=args.checkpoint, simple=args.simple,
         batch_size=args.batch_size, retries=args.retries, resolve=args.resolve,
         banners=args.banners, http_probe=args.http_probe, vulns=args.vulns,

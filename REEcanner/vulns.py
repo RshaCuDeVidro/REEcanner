@@ -4,6 +4,7 @@ import json
 import re
 import sys
 import shutil
+import functools
 
 def has_searchsploit():
     """Check if searchsploit is available"""
@@ -35,13 +36,18 @@ def parse_banner(banner, port=None):
 
     # generic: try to extract "Name/Version" pattern
     # skip protocol version strings like HTTP/1.1, HTTP/2, SMTP, etc
-    SKIP = {'HTTP', 'SMTP', 'ESMTP', 'FTP', 'IMAP', 'POP3', 'SIP', 'RTSP', 'IRC'}
-    m = re.search(r'([A-Za-z][\w.-]+)[/\s](\d+\.\d+(?:\.\d+)?)', banner)
+    SKIP = {'HTTP', 'SMTP', 'ESMTP', 'FTP', 'IMAP', 'POP3', 'SIP', 'RTSP', 'IRC', 'SSH'}
+    # Improved regex: supports name/version, name version, and version with more segments
+    m = re.search(r'([A-Za-z][\w.-]{2,})[/\s](\d+\.\d+(?:[\d.]+)?)', banner)
     if m and m.group(1).upper() not in SKIP:
         return f"{m.group(1)} {m.group(2)}"
     
     return None
 
+# Softwares que vale a pena buscar mesmo sem versão (com cautela)
+HIGH_RISK_SOFTWARE = {'DRUPAL', 'WORDPRESS', 'JOOMLA', 'MAGENTO', 'EXCHANGE', 'SHAREPOINT', 'COLDFUSION', 'GITLAB'}
+
+@functools.lru_cache(maxsize=1024)
 def searchsploit_query(query, max_results=5):
     """Run searchsploit and return parsed results"""
     if not query or not has_searchsploit():
@@ -71,14 +77,22 @@ def searchsploit_query(query, max_results=5):
 
 def lookup_vulns(banner, port=None, server=None):
     queries = []
-    if server:
-        parsed = parse_banner(server, port)
+    
+    def add_query(raw):
+        parsed = parse_banner(raw, port)
         if parsed:
             queries.append(parsed)
-    if banner:
-        parsed = parse_banner(banner, port)
-        if parsed and parsed not in queries:
-            queries.append(parsed)
+        else:
+            # Fallback: if it matches high risk software exactly, query it
+            clean = re.sub(r'[^A-Za-z0-9]', '', str(raw)).upper()
+            if clean in HIGH_RISK_SOFTWARE:
+                queries.append(raw.strip())
+
+    if server: add_query(server)
+    if banner: add_query(banner)
+    
+    # dedupe queries
+    queries = list(dict.fromkeys(queries))
     
     all_exploits = []
     seen_ids = set()

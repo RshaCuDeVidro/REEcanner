@@ -11,6 +11,8 @@ import os
 import queue
 import signal
 from datetime import datetime
+from REEcanner.fingerprint import guess_os
+from REEcanner.ports import get_service_name
 
 try:
     _lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worker.so'))
@@ -386,13 +388,11 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
             ttl = data[8]
             window = (data[iph_len + 14] << 8) | data[iph_len + 15]
             try:
-                from REEcanner.fingerprint import guess_os
                 os_guess = guess_os(ttl, window)
             except: os_guess = ""
             
             # service name
             try:
-                from REEcanner.ports import get_service_name
                 svc = get_service_name(sp)
             except: svc = ""
             
@@ -418,7 +418,6 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
             if results_list is not None:
                 r = {'ip': ip_str, 'port': sp, 'proto': 'tcp'}
                 if os_guess: r['os'] = os_guess
-                if hostname: r['hostname'] = hostname
                 if svc: r['service'] = svc
                 results_list.append(r)
             # submit for probing
@@ -556,7 +555,7 @@ class Scanner:
                         sent_total = sum(self.sent_array)
                         current_idx = self.start_index + sent_total
                         with open(self.checkpoint_file, 'w') as f:
-                            json.dump({"index": current_idx}, f)
+                            json.dump({"index": current_idx, "seed": self.seed}, f)
                         last_checkpoint_time = now
                 
                 # progress bar todo tick
@@ -622,7 +621,7 @@ class Scanner:
         if self.checkpoint_file:
             try:
                 with open(self.checkpoint_file, 'w') as f:
-                    json.dump({"index": self.start_index + sent_total}, f)
+                    json.dump({"index": self.start_index + sent_total, "seed": self.seed}, f)
             except: pass
 
         self.run_flag.value = 0
