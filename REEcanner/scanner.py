@@ -521,9 +521,17 @@ class Scanner:
         grace_period = 3.0  # imitando masscan, demorar um tico pro scan terminar 
         grace_start = None
         curr_pps = 0.0
+        interrupted = False
         try:
             while self.run_event.is_set() and self.run_flag.value:
                 time.sleep(0.1)
+                
+                if probe_engine and self._probe_queue:
+                    while not self._probe_queue.empty():
+                        try:
+                            ip, port = self._probe_queue.get_nowait()
+                            probe_engine.submit(ip, port)
+                        except: break
                 
                 # ver se terminou
                 if grace_start is None and all(not p.is_alive() for p in procs):
@@ -588,9 +596,11 @@ class Scanner:
                         sys.stderr.write(f"\n[!] adaptive: actual rate {curr_pps:.0f} << target {self.rate_limit}, possible congestion\033[K\n")
                         sys.stderr.flush()
         except KeyboardInterrupt:
+            interrupted = True
             self.run_flag.value = 0
             self.run_event.clear()
         except:
+            interrupted = True
             self.run_flag.value = 0
             self.run_event.clear()
         
@@ -601,10 +611,11 @@ class Scanner:
                     ip, port = self._probe_queue.get_nowait()
                     probe_engine.submit(ip, port)
                 except: break
-            # wait for probes to finish
-            import time as _t
-            _t.sleep(2)
-            probe_engine.stop()
+            if not interrupted and not probe_engine.queue.empty():
+                if not self.simple and not self.quiet:
+                    sys.stderr.write(f"\r[*] waiting for {probe_engine.queue.qsize()} pending probes to finish...\033[K\n")
+                    sys.stderr.flush()
+            probe_engine.stop(force=interrupted)
         
         if probe_engine:
             self._probe_engine_results = list(probe_engine.results)
@@ -665,9 +676,12 @@ class Scanner:
         
         from rich.table import Table
         has_probes = bool(probe_map)
+        has_domain = any('hostname' in pr or 'tls_domains' in pr for pr in probe_map.values())
         
         table = Table(title="scan results", border_style="dim", show_lines=False, pad_edge=False)
         table.add_column("IP", style="bold white", min_width=15)
+        if has_domain:
+            table.add_column("Domain", style="yellow")
         table.add_column("Port", style="cyan", justify="right")
         table.add_column("Service", style="green")
         if has_probes:
@@ -681,11 +695,26 @@ class Scanner:
                 port += '/udp'
             svc = r.get('service', '')
             
-            row = [ip, port, svc]
+            row = [ip]
+            
+            key = (ip, r.get('port'))
+            pr = probe_map.get(key, {})
+            
+            if has_domain:
+                doms = []
+                if 'hostname' in pr: doms.append(pr['hostname'])
+                if 'tls_domains' in pr: doms.extend(pr['tls_domains'])
+                unique_doms = []
+                for d in doms:
+                    if d not in unique_doms: unique_doms.append(d)
+                
+                dom_str = ", ".join(unique_doms)
+                if len(dom_str) > 40: dom_str = dom_str[:37] + "..."
+                row.append(dom_str)
+                
+            row.extend([port, svc])
             
             if has_probes:
-                key = (ip, r.get('port'))
-                pr = probe_map.get(key, {})
                 version = pr.get('server', '')
                 if not version and 'banner' in pr:
                     version = pr['banner'][:50]

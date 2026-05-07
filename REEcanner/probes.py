@@ -36,11 +36,33 @@ def http_probe(ip, port, timeout=5):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect((ip, port))
+        tls_domains = []
         if use_ssl:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             sock = ctx.wrap_socket(sock, server_hostname=ip)
+            try:
+                der = sock.getpeercert(binary_form=True)
+                if der:
+                    import cryptography.x509 as x509
+                    from cryptography.x509.oid import ExtensionOID, NameOID
+                    cert = x509.load_der_x509_certificate(der)
+                    try:
+                        ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+                        tls_domains.extend(ext.value.get_values_for_type(x509.DNSName))
+                    except: pass
+                    
+                    if not tls_domains:
+                        try:
+                            cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+                            if cn: tls_domains.append(cn[0].value)
+                        except: pass
+                        
+                    if tls_domains:
+                        tls_domains = list(set(d.replace('*.', '') for d in tls_domains if d and isinstance(d, str)))
+            except: pass
+            
         sock.send(f"GET / HTTP/1.1\r\nHost: {ip}\r\nConnection: close\r\nUser-Agent: Mozilla/5.0\r\n\r\n".encode())
         data = b""
         while True:
@@ -70,6 +92,7 @@ def http_probe(ip, port, timeout=5):
                 elif k == 'content-type': r['content_type'] = v.strip()
         m = re.search(r'<title[^>]*>(.*?)</title>', text, re.I | re.S)
         if m: r['title'] = re.sub(r'\s+', ' ', m.group(1)).strip()[:120]
+        if tls_domains: r['tls_domains'] = tls_domains
         return r if r else None
     except:
         return None
@@ -109,19 +132,24 @@ class ProbeEngine:
         try: self.queue.put_nowait((ip, port))
         except: pass
 
-    def stop(self):
-        self._stop = True
+    def stop(self, force=False):
+        if force:
+            self._stop = True
+        
         for _ in self._workers:
-            try: self.queue.put_nowait(None)
+            try: self.queue.put(None)
             except: pass
+            
         for t in self._workers:
-            t.join(timeout=5)
+            t.join(timeout=10 if force else None)
 
     def _worker(self):
-        while not self._stop:
+        while True:
             try:
                 item = self.queue.get(timeout=0.5)
-            except: continue
+            except queue.Empty:
+                if self._stop: break
+                continue
             if item is None: break
             ip, port = item
             result = {'ip': ip, 'port': port}
@@ -138,8 +166,7 @@ class ProbeEngine:
                         sys.stdout.flush()
                 except: pass
 
-            # HTTP probe for web ports
-            if self.do_http and port in HTTP_PORTS:
+            if (self.do_http or self.do_resolve) and port in HTTP_PORTS:
                 hr = http_probe(ip, port, self.timeout)
                 if hr:
                     result.update(hr)
@@ -149,6 +176,7 @@ class ProbeEngine:
                         if 'status' in hr: parts.append(f"{hr['status']}")
                         if 'title' in hr: parts.append(f"\"{hr['title']}\"")
                         if 'server' in hr: parts.append(hr['server'])
+                        if 'tls_domains' in hr: parts.append(f"certs: {','.join(hr['tls_domains'])}")
                         if 'redirect' in hr: parts.append(f"→ {hr['redirect']}")
                         if parts:
                             info = ' | '.join(parts)

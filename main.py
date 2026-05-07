@@ -194,6 +194,8 @@ def main():
                         if 'exploits' in r_copy:
                             r_copy['vulns_count'] = len(r_copy['exploits'])
                             del r_copy['exploits']
+                        if 'tls_domains' in r_copy:
+                            r_copy['tls_domains'] = ','.join(r_copy['tls_domains'])
                         attrs = ' '.join(f'{k}="{str(v).replace(chr(34), chr(39))}"' for k, v in r_copy.items() if isinstance(v, (str, int)))
                         f.write(f'  <host {attrs}/>\n')
                     f.write('</reecanner>\n')
@@ -206,7 +208,8 @@ def main():
                         svc = r.get('service', '')
                         hostname = r.get('hostname', '')
                         banner = r.get('banner', '')
-                        extra = [x for x in [os_info, svc, hostname, banner] if x]
+                        tls_doms = ','.join(r.get('tls_domains', [])) if r.get('tls_domains') else ''
+                        extra = [x for x in [os_info, svc, hostname, banner, tls_doms] if x]
                         f.write(f"Host: {r['ip']} Port: {r['port']}/open/tcp {' | '.join(extra)}\n")
                 console.print(f"  grepable saved to: [italic]{args.output_grep}[/italic]")
             if args.output_sqlite:
@@ -218,15 +221,16 @@ def main():
                     cursor.execute('''CREATE TABLE IF NOT EXISTS hosts 
                                    (ip TEXT, port INTEGER, proto TEXT, service TEXT, hostname TEXT, 
                                     os TEXT, banner TEXT, title TEXT, status INTEGER, server TEXT,
-                                    redirect TEXT, vulnerabilities TEXT)''')
+                                    redirect TEXT, vulnerabilities TEXT, tls_domains TEXT)''')
                     for r in results:
                         vulns_json = json_mod.dumps(r.get('exploits', [])) if r.get('exploits') else None
+                        tls_json = json_mod.dumps(r.get('tls_domains', [])) if r.get('tls_domains') else None
                         cursor.execute("""INSERT INTO hosts (ip, port, proto, service, hostname, os, banner, 
-                                                              title, status, server, redirect, vulnerabilities) 
-                                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                                              title, status, server, redirect, vulnerabilities, tls_domains) 
+                                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                                        (r.get('ip'), r.get('port'), r.get('proto'), r.get('service'), 
                                         r.get('hostname'), r.get('os'), r.get('banner'), r.get('title'), 
-                                        r.get('status'), r.get('server'), r.get('redirect'), vulns_json))
+                                        r.get('status'), r.get('server'), r.get('redirect'), vulns_json, tls_json))
                     conn.commit()
                     conn.close()
                     console.print(f"  sqlite database saved to: [italic]{args.output_sqlite}[/italic]")

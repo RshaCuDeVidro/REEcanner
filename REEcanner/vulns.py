@@ -45,7 +45,12 @@ def parse_banner(banner, port=None):
     return None
 
 # Softwares que vale a pena buscar mesmo sem versão (com cautela)
-HIGH_RISK_SOFTWARE = {'DRUPAL', 'WORDPRESS', 'JOOMLA', 'MAGENTO', 'EXCHANGE', 'SHAREPOINT', 'COLDFUSION', 'GITLAB'}
+HIGH_RISK_SOFTWARE = {
+    'DRUPAL', 'WORDPRESS', 'JOOMLA', 'MAGENTO', 'EXCHANGE', 'SHAREPOINT', 'COLDFUSION', 
+    'GITLAB', 'JENKINS', 'CONFLUENCE', 'JIRA', 'TOMCAT', 'WEBLOGIC', 'PHPMYADMIN', 
+    'ZIMBRA', 'ROUNDCUBE', 'FORTIGATE', 'GRAFANA', 'KIBANA', 'CPANEL', 'PLESK',
+    'WEBSPHERE', 'VCENTER', 'ESXI', 'SONICWALL', 'TEAMCITY'
+}
 
 @functools.lru_cache(maxsize=1024)
 def searchsploit_query(query, max_results=5):
