@@ -1,7 +1,7 @@
 CC      = gcc
 CFLAGS  = -O3 -march=native -flto -fPIC -shared
-SRC     = REEcanner/worker.c
-OUT     = REEcanner/worker.so
+SRC     = reecanner/worker.c
+OUT     = reecanner/worker.so
 
 all: $(OUT)
 

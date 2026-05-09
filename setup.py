@@ -13,16 +13,16 @@ setup(
     version='1.0.0',
     description='Fast TCP/UDP network scanner build with python and C worker, identify vulns with searchsploit. shodan like',
     author='rsha',
-    py_modules=['main'],
-    packages=['REEcanner'],
-    package_data={'REEcanner': ['worker.so', 'data/*']},
+    packages=['reecanner'],
+    package_data={'reecanner': ['worker.so', 'data/*']},
     include_package_data=True,
     install_requires=[
         'rich',
+        'redis',
     ],
     entry_points={
         'console_scripts': [
-            'reecanner=main:main',
+            'reecanner=reecanner.__main__:main',
         ],
     },
     cmdclass={

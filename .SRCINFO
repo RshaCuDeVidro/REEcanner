@@ -10,6 +10,7 @@ pkgbase = reecanner-git
 	makedepends = python-setuptools
 	depends = python
 	depends = python-rich
+	depends = python-redis
 	source = git+https://github.com/RshaCuDeVidro/REEcanner.git
 	md5sums = SKIP
 

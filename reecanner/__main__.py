@@ -7,9 +7,9 @@ import os
 import ipaddress
 from datetime import datetime
 from rich.console import Console
-from REEcanner.utils import parse_ports_list, BlacklistManager, InclusionManager, resolve_asn
-from REEcanner.ports import get_top_ports
-from REEcanner.scanner import Scanner
+from reecanner.utils import parse_ports_list, BlacklistManager, InclusionManager, resolve_asn
+from reecanner.ports import get_top_ports
+from reecanner.scanner import Scanner
 
 def main():
     parser = argparse.ArgumentParser(description="reecanner - fast ip/port scout")

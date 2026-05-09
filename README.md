@@ -10,8 +10,8 @@ without any coordination.
 It is designed for scanning large portions of the IPv4 address space.
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 80 -r 0 --override-safety -q
-[*] reecanner initialized. targeting 1 ports.
+$ sudo reecanner 0.0.0.0/0 -p 80 -r 0 --override-safety -q
+[*] reecanner initialized. targeting 1 ports. mode: SYN
 [*] workers: 4 | rate: 0 pps | seed: 3848841034
 [*] using C worker (worker.so)
 
@@ -49,9 +49,9 @@ $ sudo pipx install --global .
 If you just want to run it from the folder without installing it to your system:
 
 ```
-$ pip install rich
+$ pip install rich redis
 $ make
-$ sudo python3 main.py [options]
+$ sudo python3 -m reecanner [options]
 ```
 
 Running `make` compiles the high-performance C packet engine (`worker.so`). Without it, the scanner falls back to a pure Python implementation at roughly 5x lower throughput.
@@ -59,7 +59,9 @@ Running `make` compiles the high-performance C packet engine (`worker.so`). With
 ## Usage
 
 ```
-sudo python3 main.py <target> [options]
+$ sudo reecanner <target> [options]
+# OR
+$ sudo python3 -m reecanner <target> [options]
 ```
 
 The target is a CIDR block or comma-separated list of CIDR blocks. If
@@ -135,35 +137,31 @@ CHECKPOINTING
 Scan a local subnet for common services:
 
 ```
-$ sudo python3 main.py 192.168.1.0/24 -p 22,80,443,3306,8080 --scan-private
+$ sudo reecanner 192.168.1.0/24 -p 22,80,443,3306,8080 --scan-private
 ```
 
 Scan a /8 block for web servers at 50k pps and save results:
 
 ```
-$ sudo python3 main.py 104.0.0.0/8 -p 80,443 -r 50000 --override-safety -o results.json
+$ sudo reecanner 104.0.0.0/8 -p 80,443 -r 50000 --override-safety -o results.json
 ```
 
 Scan the entire internet for SSH, stop after 500 hits:
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 22 -r 100000 --override-safety -l 500
+$ sudo reecanner 0.0.0.0/0 -p 22 -r 100000 --override-safety -l 500
 ```
 
 Unlimited rate, maximum throughput:
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 80 -r 0 --override-safety --batch-size 8192 -w 4 -q
+$ sudo reecanner 0.0.0.0/0 -p 80 -r 0 --override-safety --batch-size 8192 -w 4 -q
 ```
 
 Scan with checkpoint — interrupt with Ctrl+C and resume later:
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 443 -r 50000 --override-safety \
-    --checkpoint scan.ckpt -o hits.json
-^C
-
-$ sudo python3 main.py 0.0.0.0/0 -p 443 -r 50000 --override-safety \
+$ sudo reecanner 0.0.0.0/0 -p 443 -r 50000 --override-safety \
     --checkpoint scan.ckpt -o hits.json
 [*] resuming scan from index 18432000 via checkpoint
 ```
@@ -171,15 +169,15 @@ $ sudo python3 main.py 0.0.0.0/0 -p 443 -r 50000 --override-safety \
 Pipe results into other tools:
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 443 --simple -q | httpx -silent
-$ sudo python3 main.py 0.0.0.0/0 -p 80 --simple -q | nuclei -t cves/
-$ sudo python3 main.py 0.0.0.0/0 -p 22 --simple -q > ssh_hosts.txt
+$ sudo reecanner 0.0.0.0/0 -p 443 --simple -q | httpx -silent
+$ sudo reecanner 0.0.0.0/0 -p 80 --simple -q | nuclei -t cves/
+$ sudo reecanner 0.0.0.0/0 -p 22 --simple -q > ssh_hosts.txt
 ```
 
 Scan specific ports on multiple ranges:
 
 ```
-$ sudo python3 main.py 104.0.0.0/8,45.0.0.0/8 -p 80,443,8443
+$ sudo reecanner 104.0.0.0/8,45.0.0.0/8 -p 80,443,8443
 ```
 
 Include targets from a file:
@@ -190,7 +188,7 @@ $ cat targets.txt
 172.64.0.0/13
 198.41.128.0/17
 
-$ sudo python3 main.py --include-file targets.txt -p 443 -r 10000
+$ sudo reecanner --include-file targets.txt -p 443 -r 10000
 ```
 
 Custom blacklist to avoid specific networks:
@@ -200,58 +198,58 @@ $ cat exclude.txt
 203.0.113.0/24
 198.51.100.0/24
 
-$ sudo python3 main.py 0.0.0.0/0 -p 80 -b exclude.txt -r 50000 --override-safety
+$ sudo reecanner 0.0.0.0/0 -p 80 -b exclude.txt -r 50000 --override-safety
 ```
 
 Reproducible scan — same seed produces the same IP order:
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 80 --seed 42 -l 100 --simple -q > run1.txt
-$ sudo python3 main.py 0.0.0.0/0 -p 80 --seed 42 -l 100 --simple -q > run2.txt
+$ sudo reecanner 0.0.0.0/0 -p 80 --seed 42 -l 100 --simple -q > run1.txt
+$ sudo reecanner 0.0.0.0/0 -p 80 --seed 42 -l 100 --simple -q > run2.txt
 $ diff run1.txt run2.txt    # identical
 ```
 
 Find the first N open hosts on a specific port:
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 3389 -l 50 --simple -q
+$ sudo reecanner 0.0.0.0/0 -p 3389 -l 50 --simple -q
 ```
 
 Scan all common ports on a single target range:
 
 ```
-$ sudo python3 main.py 10.0.0.0/16 -p 21-25,53,80,110,143,443,993,995,3306,3389,5432,8080,8443 \
+$ sudo reecanner 10.0.0.0/16 -p 21-25,53,80,110,143,443,993,995,3306,3389,5432,8080,8443 \
     --scan-private -r 5000
 ```
 
 UDP scan for DNS servers (using `--top-ports` or `-p 53`):
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 53 --udp -r 100000 --override-safety
+$ sudo reecanner 0.0.0.0/0 -p 53 --udp -r 100000 --override-safety
 ```
 
 Scan an entire ASN (automatically resolves to CIDRs):
 
 ```
-$ sudo python3 main.py AS14061 -p 80,443
+$ sudo reecanner AS14061 -p 80,443
 ```
 
 Read targets from stdin (e.g. results from other tools):
 
 ```
-$ subfinder -d example.com -silent | sudo python3 main.py - -p 443
+$ subfinder -d example.com -silent | sudo reecanner - -p 443
 ```
 
 Push results to a Redis queue for external processing (e.g. a separate crawler):
 
 ```
-$ sudo python3 main.py 0.0.0.0/0 -p 6379 --redis redis://localhost:6379/0
+$ sudo reecanner 0.0.0.0/0 -p 6379 --redis redis://localhost:6379/0
 ```
 
 Service Discovery and Vulnerability Scanning:
 
 ```
-$ sudo python3 main.py 192.168.1.0/24 -p 80,443,22 --banners --http-probe --vulns --resolve
+$ sudo reecanner 192.168.1.0/24 -p 80,443,22 --banners --http-probe --vulns --resolve
 ```
 
 > [!TIP]
@@ -264,9 +262,9 @@ All nodes must use the same `--seed` value. Each node scans a disjoint
 subset of IPs.
 
 ```
-node0$ sudo python3 main.py 0.0.0.0/0 -p 80 --shards 3 --shard-id 0 --seed 1337 -r 0 --override-safety
-node1$ sudo python3 main.py 0.0.0.0/0 -p 80 --shards 3 --shard-id 1 --seed 1337 -r 0 --override-safety
-node2$ sudo python3 main.py 0.0.0.0/0 -p 80 --shards 3 --shard-id 2 --seed 1337 -r 0 --override-safety
+node0$ sudo reecanner 0.0.0.0/0 -p 80 --shards 3 --shard-id 0 --seed 1337 -r 0 --override-safety
+node1$ sudo reecanner 0.0.0.0/0 -p 80 --shards 3 --shard-id 1 --seed 1337 -r 0 --override-safety
+node2$ sudo reecanner 0.0.0.0/0 -p 80 --shards 3 --shard-id 2 --seed 1337 -r 0 --override-safety
 ```
 
 The Feistel cipher generates a deterministic permutation. With N shards,
@@ -363,20 +361,56 @@ enabled, each node processes only indices where `index % shards == shard_id`.
 Since the permutation is fixed, all nodes with the same seed collectively
 cover the entire address space without overlap or communication.
 
+## Using as a Library
+
+REEcanner is fully modular. You can import its engines into your own Python scripts for custom workflows (like pushing to databases, correlating with other tools, or building your own scanners).
+
+Check out the **[Advanced Library Example (example_library.py)](example_library.py)** to see how to:
+- Resolve ASNs to CIDRs automatically.
+- Initialize the high-speed packet engine.
+- Enable HTTP probing and Vulnerability scanning (SearchSploit).
+- Generate a structured JSON report.
+
+Here is a quick overview of how simple it is:
+
+```python
+from reecanner.scanner import Scanner
+from reecanner.utils import BlacklistManager, InclusionManager
+
+if __name__ == '__main__':
+    inc = InclusionManager(["192.168.1.0/24"])
+    bl = BlacklistManager(allow_private=True)
+
+    scanner = Scanner(
+        ports=[80, 443],
+        rate_limit=5000,
+        blacklist_manager=bl,
+        inclusion_manager=inc,
+        banners=True,
+        http_probe=True
+    )
+
+    scanner.run(console=None)
+
+    for host in scanner.get_results():
+        print(f"Found {host['ip']}:{host['port']} - {host.get('title')}")
+```
+
 ## Project Structure
 
 ```
-main.py              CLI entry point
-makefile             compiles worker.c
-REEcanner/
+setup.py             Package configuration
+makefile             Compiles C engine
+reecanner/
+  __main__.py        CLI entry point (python -m reecanner)
   worker.c           C transmit engine
-  scanner.py         Scanner class, sniffer, process management
-  utils.py           FeistelShuffler, BlacklistManager, InclusionManager
-  packet.py          packet parsing utilities
-  ports.py           Top ports definitions
-  probes.py          Service banners and HTTP probes
-  fingerprint.py     Service detection and vulnerabilty lookups
-  vulns.py           Vulnerability checking against searchsploit
+  scanner.py         Core scanner logic & process management
+  utils.py           Feistel shuffler & network managers
+  packet.py          Raw packet construction
+  ports.py           Service name & top-ports mapping
+  probes.py          Banner grabbing & HTTP probing
+  fingerprint.py     OS & Service fingerprinting
+  vulns.py           Searchsploit integration
 ```
 
 ## Legal

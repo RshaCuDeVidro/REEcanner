@@ -203,7 +203,7 @@ class ProbeEngine:
             # vuln lookup via searchsploit
             if self.do_vulns and (banner_text or server_header):
                 try:
-                    from REEcanner.vulns import lookup_vulns, parse_banner
+                    from reecanner.vulns import lookup_vulns, parse_banner
                     parsed_name = None
                     if server_header:
                         parsed_name = parse_banner(server_header, port)

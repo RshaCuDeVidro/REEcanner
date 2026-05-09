@@ -73,7 +73,7 @@ def resolve_asn(asn: str) -> list[str]:
     try:
         asn_num = int(asn.upper().replace("AS", ""))
         url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn_num}"
-        req = urllib.request.Request(url, headers={'User-Agent': 'REEcanner-Recon/1.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'reecanner-Recon/1.0'})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
             prefixes = []

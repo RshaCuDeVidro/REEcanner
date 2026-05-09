@@ -16,7 +16,7 @@ def get_nmap_parser():
     global _nmap_parser
     if _nmap_parser is None:
         try:
-            from REEcanner.nmap_probes import NmapProbes
+            from reecanner.nmap_probes import NmapProbes
             _nmap_parser = NmapProbes()
         except: pass
     return _nmap_parser

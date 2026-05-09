@@ -11,8 +11,8 @@ import os
 import queue
 import signal
 from datetime import datetime
-from REEcanner.fingerprint import guess_os
-from REEcanner.ports import get_service_name
+from reecanner.fingerprint import guess_os
+from reecanner.ports import get_service_name
 
 try:
     _lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worker.so'))
@@ -482,11 +482,17 @@ class Scanner:
             return s.getsockname()[0]
         finally: s.close()
 
-    def run(self, console):
+    def run(self, console=None):
+        if console is None:
+            class DummyConsole:
+                no_color = True
+                def print(self, *args, **kwargs): pass
+            console = DummyConsole()
+        
         # start probe engine if needed
         probe_engine = None
         if self.banners or self.http_probe or self.vulns or self.resolve:
-            from REEcanner.probes import ProbeEngine
+            from reecanner.probes import ProbeEngine
             probe_engine = ProbeEngine(do_banners=self.banners, do_http=self.http_probe, do_vulns=self.vulns, do_resolve=self.resolve, use_color=not console.no_color, quiet=self.quiet, simple=self.simple)
             probe_engine.start()
             
