@@ -69,8 +69,9 @@ omitted, defaults to the entire IPv4 space (`0.0.0.0/0`).
 
 ```
 TARGET SELECTION
-  target                      CIDR(s) to scan (e.g. 45.0.0.0/8)
-  -i, --include CIDR[,CIDR]  additional CIDRs to include
+  target                      CIDR(s), IP(s), or ASN(s) to scan (e.g. 45.0.0.0/8, AS14061)
+                              use '-' for targets from stdin
+  -i, --include CIDR[,CIDR]   additional CIDRs to include
   --include-file FILE         include CIDRs from file, one per line
   --exclude CIDR[,CIDR]       exclude IPs/CIDRs from scan (comma-separated)
 
@@ -100,20 +101,26 @@ EXCLUSIONS
   --scan-private              include RFC1918 and reserved ranges
 
 PROBING & RESOLUTION
-  --resolve                   reverse DNS resolve found IPs
-  --banners                   grab banners from discovered services
   --http-probe                HTTP probe open web ports (title, status, server)
+  --banners                   grab banners from discovered services
   --vulns                     search exploits via searchsploit for discovered services
+  --resolve                   reverse DNS resolve found IPs and extract TLS domains
 
 OUTPUT
   -o, --output FILE           write results as JSON lines
   -oJ, --output-json FILE     output results as JSON
   -oX, --output-xml FILE      output results as XML
   -oG, --output-grep FILE     output results as grepable format
+  -oS, --output-sqlite FILE   output results as a SQLite database
   -q, --quiet                 suppress per-host output, show only stats
   --simple                    output IP or IP:PORT to stdout (for piping)
   --no-port                   omit port from output (just show IP)
   --no-color                  disable ANSI color codes
+
+INTEGRATION
+  --redis URL                 push discovered hosts to Redis queue
+                              (e.g., redis://localhost:6379/0)
+                              Useful for distributed pipelines or crawlers.
 
 DISTRIBUTED SCANNING
   --shards N                  total number of nodes (default: 1)
@@ -223,11 +230,32 @@ UDP scan for DNS servers (using `--top-ports` or `-p 53`):
 $ sudo python3 main.py 0.0.0.0/0 -p 53 --udp -r 100000 --override-safety
 ```
 
-Service Discovery and Vulnerability Scanning (Requires `--banners` or `--vulns`):
+Scan an entire ASN (automatically resolves to CIDRs):
+
+```
+$ sudo python3 main.py AS14061 -p 80,443
+```
+
+Read targets from stdin (e.g. results from other tools):
+
+```
+$ subfinder -d example.com -silent | sudo python3 main.py - -p 443
+```
+
+Push results to a Redis queue for external processing (e.g. a separate crawler):
+
+```
+$ sudo python3 main.py 0.0.0.0/0 -p 6379 --redis redis://localhost:6379/0
+```
+
+Service Discovery and Vulnerability Scanning:
 
 ```
 $ sudo python3 main.py 192.168.1.0/24 -p 80,443,22 --banners --http-probe --vulns --resolve
 ```
+
+> [!TIP]
+> When using `--http-probe` or `--resolve` on port 443, REEcanner automatically extracts all DNS names from the SSL certificate's Subject Alternative Name (SAN) field.
 
 ## Distributed Scanning
 

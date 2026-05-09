@@ -432,7 +432,7 @@ def process_packet(data, src_port, seen_hosts, found_count, quiet, log_queue, G,
                 return
 
 class Scanner:
-    def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False, batch_size=4096, retries=1, resolve=False, banners=False, http_probe=False, vulns=False, udp=False, adaptive=False, no_port=False):
+    def __init__(self, ports, rate_limit=1000, blacklist_manager=None, inclusion_manager=None, source_port=None, workers=None, limit=0, output_file=None, quiet=False, seed=None, start_index=0, shards=1, shard_id=0, checkpoint_file=None, simple=False, batch_size=4096, retries=1, resolve=False, banners=False, http_probe=False, vulns=False, udp=False, adaptive=False, no_port=False, redis_url=None):
         self.ports = ports
         self.rate_limit = rate_limit
         self.bl_mgr = blacklist_manager
@@ -467,12 +467,13 @@ class Scanner:
         self.udp = udp
         self.adaptive = adaptive
         self.no_port = no_port
+        self.redis_url = redis_url
         self.total_work = self.inc_mgr.total_ips * len(self.ports) * self.retries
         self.use_c = HAS_C_WORKER
         # shared results list for output formats
         self._results_manager = multiprocessing.Manager()
         self._results_list = self._results_manager.list()
-        self._probe_queue = self._results_manager.Queue() if (banners or http_probe or resolve) else None
+        self._probe_queue = self._results_manager.Queue() if (banners or http_probe or resolve or redis_url) else None
 
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -488,6 +489,18 @@ class Scanner:
             from REEcanner.probes import ProbeEngine
             probe_engine = ProbeEngine(do_banners=self.banners, do_http=self.http_probe, do_vulns=self.vulns, do_resolve=self.resolve, use_color=not console.no_color, quiet=self.quiet, simple=self.simple)
             probe_engine.start()
+            
+        redis_client = None
+        if self.redis_url:
+            import redis
+            try:
+                redis_client = redis.Redis.from_url(self.redis_url)
+                redis_client.ping()
+                console.print(f"[bold green][*][/bold green] connected to redis: [cyan]{self.redis_url}[/cyan]")
+            except Exception as e:
+                console.print(f"[bold red][!][/bold red] failed to connect to redis: {e}")
+                if probe_engine: probe_engine.stop()
+                return []
         
         sniffer_ready = multiprocessing.Event()
         sniff_p = multiprocessing.Process(target=sniffer_process, args=(
@@ -526,11 +539,14 @@ class Scanner:
             while self.run_event.is_set() and self.run_flag.value:
                 time.sleep(0.1)
                 
-                if probe_engine and self._probe_queue:
+                if self._probe_queue:
                     while not self._probe_queue.empty():
                         try:
                             ip, port = self._probe_queue.get_nowait()
-                            probe_engine.submit(ip, port)
+                            if redis_client:
+                                redis_client.rpush("reecanner:queue", f"{ip}:{port}")
+                            elif probe_engine:
+                                probe_engine.submit(ip, port)
                         except: break
                 
                 # ver se terminou

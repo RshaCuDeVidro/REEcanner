@@ -7,7 +7,7 @@ import os
 import ipaddress
 from datetime import datetime
 from rich.console import Console
-from REEcanner.utils import parse_ports_list, BlacklistManager, InclusionManager
+from REEcanner.utils import parse_ports_list, BlacklistManager, InclusionManager, resolve_asn
 from REEcanner.ports import get_top_ports
 from REEcanner.scanner import Scanner
 
@@ -49,6 +49,7 @@ def main():
     parser.add_argument("-oX", "--output-xml", metavar="FILE", help="output results as XML")
     parser.add_argument("-oG", "--output-grep", metavar="FILE", help="output results as grepable format")
     parser.add_argument("-oS", "--output-sqlite", metavar="FILE", help="output results as a SQLite database")
+    parser.add_argument("--redis", metavar="URL", help="push discovered IP:PORT to a redis queue (e.g., redis://localhost:6379/0)")
 
     args = parser.parse_args()
 
@@ -88,6 +89,22 @@ def main():
         for line in args.include_file:
             line = line.strip()
             if line: inc_networks.append(line)
+            
+    # Process ASN targets (e.g. AS14061) -> Resolve to CIDRs
+    final_inc_networks = []
+    for net in inc_networks:
+        if net.upper().startswith("AS") and net[2:].isdigit():
+            console.print(f"[bold blue][*][/bold blue] resolving ASN [cyan]{net.upper()}[/cyan]...")
+            cidrs = resolve_asn(net)
+            if cidrs:
+                console.print(f"    -> resolved to [cyan]{len(cidrs)}[/cyan] prefixes")
+                final_inc_networks.extend(cidrs)
+            else:
+                console.print(f"[bold yellow][!][/bold yellow] could not resolve {net.upper()} or no IPv4 prefixes found.")
+        else:
+            final_inc_networks.append(net)
+            
+    inc_networks = final_inc_networks
     
     bl_networks = []
     if args.blacklist_file:
@@ -143,7 +160,7 @@ def main():
         checkpoint_file=args.checkpoint, simple=args.simple,
         batch_size=args.batch_size, retries=args.retries, resolve=args.resolve,
         banners=args.banners, http_probe=args.http_probe, vulns=args.vulns,
-        udp=args.udp, adaptive=args.adaptive, no_port=args.no_port
+        udp=args.udp, adaptive=args.adaptive, no_port=args.no_port, redis_url=args.redis
     )
 
     mode = "UDP" if args.udp else "SYN"

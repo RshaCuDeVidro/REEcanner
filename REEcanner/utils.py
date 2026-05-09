@@ -1,6 +1,8 @@
 import ipaddress
 import random
 import bisect
+import urllib.request
+import json
 from typing import List, Set
 
 def parse_ports_list(port_string: str) -> list[int]:
@@ -65,6 +67,24 @@ class FeistelShuffler:
         while x >= self.max_val:
             x = self._encrypt(x)
         return x
+
+def resolve_asn(asn: str) -> list[str]:
+    """Resolve an ASN (e.g. AS14061) to a list of IPv4 CIDRs using RIPE Stat API"""
+    try:
+        asn_num = int(asn.upper().replace("AS", ""))
+        url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn_num}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'REEcanner-Recon/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+            prefixes = []
+            for p in data.get('data', {}).get('prefixes', []):
+                prefix = p.get('prefix', '')
+                if ':' not in prefix:  # Somente IPv4
+                    prefixes.append(prefix)
+            return prefixes
+    except Exception as e:
+        print(f"\033[91m[!] error resolving ASN {asn}: {e}\033[0m")
+        return []
 
 class InclusionManager:
     def __init__(self, networks_list: List[str] = None, seed=None):
