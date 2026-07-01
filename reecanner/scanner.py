@@ -43,6 +43,7 @@ try:
         ctypes.c_uint32,                                 # feistel_mask
         ctypes.c_int,                                    # retries
         ctypes.c_int,                                    # is_udp
+        ctypes.c_int,                                    # adaptive
     ]
     HAS_C_WORKER = True
 except:
@@ -58,7 +59,7 @@ def get_net_info():
         gw_mac = next(line.split()[2] for line in arp_info.splitlines() if gw_ip in line)
         return iface, local_mac, gw_mac
     except: return None, None, None
-def c_packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_flag, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096, retries=1, is_udp=0):
+def c_packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_flag, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096, retries=1, is_udp=0, adaptive=0):
     """Thin wrapper: extract Python data → call C run_worker"""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     
@@ -102,10 +103,11 @@ def c_packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_m
         inc_mgr.shuffler.half_bits,
         inc_mgr.shuffler.mask,
         retries,
-        is_udp
+        is_udp,
+        adaptive
     )
 
-def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_event, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096, retries=1, is_udp=0):
+def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr, inc_mgr, run_event, pps_array, sent_array, net_info, total_workers, start_index=0, shards=1, shard_id=0, batch_size=4096, retries=1, is_udp=0, adaptive=0):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if hasattr(os, 'sched_setaffinity'):
         try: os.sched_setaffinity(0, {worker_id % (os.cpu_count() or 1)})
@@ -143,6 +145,9 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
         max_for_rate = max(1, (rate_limit + 9) // 10)
         eff_batch = min(eff_batch, max_for_rate)
     interval = (eff_batch / rate_limit) if rate_limit > 0 else 0
+    target_interval = interval  # piso: taxa configurada pelo usuario
+    max_interval = interval * 10 if interval > 0 else 0  # teto: 10x mais lento
+    success_streak = 0
     next_t = time.perf_counter()
     batch_msgs = []
     off = 14 if iface else 0
@@ -241,14 +246,33 @@ def packet_worker(worker_id, local_ip_bytes, ports, src_port, rate_limit, bl_mgr
                 batch_msgs[i][2] = (f"{(ip_int>>24)&255}.{(ip_int>>16)&255}.{(ip_int>>8)&255}.{ip_int&255}", 0)
             batch_count += 1
         try:
+            congested = False
             if batch_count > 0:
-                if _sendmmsg: _sendmmsg(batch_msgs[:batch_count])
+                if _sendmmsg:
+                    try:
+                        _sendmmsg(batch_msgs[:batch_count])
+                    except (BlockingIOError, OSError):
+                        congested = True
                 else:
-                    for m in batch_msgs[:batch_count]: 
-                        if iface: _send(m[0])
-                        else: _sendto(m[0], m[2])
+                    for m in batch_msgs[:batch_count]:
+                        try:
+                            if iface: _send(m[0])
+                            else: _sendto(m[0], m[2])
+                        except (BlockingIOError, OSError):
+                            congested = True
+                            break
                 pps_array[worker_id] += batch_count
                 sent_array[worker_id] += batch_count
+                # adaptive AIMD
+                if adaptive and interval > 0:
+                    if congested:
+                        interval = min(interval * 1.5, max_interval)
+                        success_streak = 0
+                    else:
+                        success_streak += 1
+                        if success_streak >= 8:
+                            interval = max(interval * 0.875, target_interval)
+                            success_streak = 0
         except: pass
         if scan_done: return
 
@@ -522,13 +546,13 @@ class Scanner:
         if self.use_c:
             #console.print(f"[bold green][*][/bold green] using [cyan]C worker[/cyan] (worker.so)")
             for i in range(self.workers_count):
-                p = multiprocessing.Process(target=c_packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_flag, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size, self.retries, 1 if self.udp else 0))
+                p = multiprocessing.Process(target=c_packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_flag, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size, self.retries, 1 if self.udp else 0, 1 if self.adaptive else 0))
                 p.start()
                 procs.append(p)
         else:
             console.print(f"[bold yellow][*][/bold yellow] C worker not available, using Python fallback")
             for i in range(self.workers_count):
-                p = multiprocessing.Process(target=packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_event, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size, self.retries, 1 if self.udp else 0))
+                p = multiprocessing.Process(target=packet_worker, args=(i, self.local_ip_bytes, self.ports, self.src_port, rpw, self.bl_mgr, self.inc_mgr, self.run_event, self.pps_array, self.sent_array, self.net_info, self.workers_count, self.start_index, self.shards, self.shard_id, self.batch_size, self.retries, 1 if self.udp else 0, 1 if self.adaptive else 0))
                 p.start()
                 procs.append(p)
         

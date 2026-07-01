@@ -113,7 +113,8 @@ void run_worker(
     int half_bits,
     uint32_t feistel_mask,
     int retries,
-    int is_udp
+    int is_udp,
+    int adaptive
 ) {
     signal(SIGINT, SIG_IGN);
 
@@ -249,6 +250,11 @@ void run_worker(
     uint32_t cached_ip = 0;
     int cached_public = 0;
 
+    // adaptive rate limiting state
+    uint64_t target_interval_ns = interval_ns;   // piso = taxa configurada pelo usuario
+    uint64_t max_interval_ns = interval_ns * 10; // teto = 10x mais lento
+    int success_streak = 0;
+
     // HOT LOOP
     while (likely(*run_flag)) {
         // rate limit
@@ -345,13 +351,35 @@ void run_worker(
         /* send batch */
         {
             int sent = 0;
+            int congested = 0;
             while (sent < batch_count) {
                 int ret = sendmmsg(sockfd, msgs + sent, batch_count - sent, 0);
                 if (likely(ret > 0)) {
                     __atomic_fetch_add(pps_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
                     __atomic_fetch_add(sent_ptr, (uint64_t)ret, __ATOMIC_RELAXED);
                     sent += ret;
-                } else break;
+                    if (ret < batch_count - (sent - ret)) congested = 1;
+                } else {
+                    congested = 1;
+                    break;
+                }
+            }
+            /* adaptive AIMD: ajustar interval_ns baseado no feedback do kernel */
+            if (adaptive && interval_ns > 0) {
+                if (congested) {
+                    /* multiplicative decrease: 50% mais lento */
+                    interval_ns = interval_ns * 3 / 2;
+                    if (interval_ns > max_interval_ns) interval_ns = max_interval_ns;
+                    success_streak = 0;
+                } else {
+                    success_streak++;
+                    if (success_streak >= 8) {
+                        /* additive increase: volta gradualmente ao alvo */
+                        interval_ns = interval_ns * 7 / 8;
+                        if (interval_ns < target_interval_ns) interval_ns = target_interval_ns;
+                        success_streak = 0;
+                    }
+                }
             }
         }
         continue;
