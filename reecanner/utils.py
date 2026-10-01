@@ -1,9 +1,16 @@
-import ipaddress
-import random
+"""Target/port parsing, Feistel shuffling and inclusion/blacklist managers."""
+from __future__ import annotations
+
 import bisect
-import urllib.request
+import ipaddress
 import json
-from typing import List, Set
+import logging
+import random
+import urllib.request
+from typing import List, Optional
+
+logger = logging.getLogger(__name__)
+
 
 def parse_ports_list(port_string: str) -> list[int]:
     ports = set()
@@ -11,39 +18,42 @@ def parse_ports_list(port_string: str) -> list[int]:
         part = part.strip()
         if not part:
             continue
-        
+
         if '-' in part:
             try:
                 start_str, end_str = part.split('-', 1)
                 start, end = int(start_str), int(end_str)
             except ValueError:
                 raise ValueError(f"invalid port range format: {part}")
-            
+
             if not (1 <= start <= 65535 and 1 <= end <= 65535):
                 raise ValueError(f"ports out of bounds in range: {part}")
             if start > end:
                 raise ValueError(f"start port greater than end port: {part}")
-                
+
             ports.update(range(start, end + 1))
         else:
             try:
                 port = int(part)
             except ValueError:
                 raise ValueError(f"invalid port number: {part}")
-                
+
             if not (1 <= port <= 65535):
                 raise ValueError(f"port out of bounds: {port}")
             ports.add(port)
-            
+
     return sorted(list(ports))
 
+
 class FeistelShuffler:
+    """Format-preserving Feistel permutation over [0, max_val) via cycle walking."""
+
     def __init__(self, key: int, max_val: int = 0xFFFFFFFF):
         self.max_val = max_val
         self.seed = key
         self.keys = [(key >> (8 * i)) & 0xFFFFFFFF for i in range(4)]
 
-        #bloco dinamico sizing, nao mexer da muito bug mesmo, trust me
+        # Feistel block sizing: bits must be even and at least 2
         bits = max(2, (max_val - 1).bit_length()) if max_val > 1 else 2
         if bits % 2:
             bits += 1
@@ -68,6 +78,7 @@ class FeistelShuffler:
             x = self._encrypt(x)
         return x
 
+
 def resolve_asn(asn: str) -> list[str]:
     """Resolve an ASN (e.g. AS14061) to a list of IPv4 CIDRs using RIPE Stat API"""
     try:
@@ -83,35 +94,55 @@ def resolve_asn(asn: str) -> list[str]:
                     prefixes.append(prefix)
             return prefixes
     except Exception as e:
-        print(f"\033[91m[!] error resolving ASN {asn}: {e}\033[0m")
+        logger.error("error resolving ASN %s: %s", asn, e)
         return []
 
+
 class InclusionManager:
-    def __init__(self, networks_list: List[str] = None, seed=None):
-        self.networks = []
-        if not networks_list or len(networks_list) == 0: 
+    """Holds the target networks and maps shuffled indices to IP addresses."""
+
+    def __init__(self, networks_list: Optional[List[str]] = None, seed: Optional[int] = None):
+        self.networks: list = []
+        if not networks_list or len(networks_list) == 0:
             networks_list = ["0.0.0.0/0"]
-        
-        self.total_ips = 0
+
+        # collect (first, last) address of each network, then merge
+        # overlapping/adjacent ranges so duplicate or nested targets are
+        # scanned exactly once
+        ranges = []
         for net_str in networks_list:
             try:
                 net = ipaddress.IPv4Network(net_str.strip(), strict=False)
-                size = net.num_addresses
-                self.networks.append({
-                    'net': int(net.network_address), 
-                    'size': size, 
-                    'start': self.total_ips
-                })
-                self.total_ips += size
-            except: continue
-            
+                first = int(net.network_address)
+                ranges.append((first, first + net.num_addresses - 1))
+            except ValueError as e:
+                logger.warning("ignoring invalid target network %r: %s", net_str, e)
+                continue
+
+        ranges.sort()
+        merged: list = []
+        for first, last in ranges:
+            if merged and first <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], last)
+            else:
+                merged.append([first, last])
+
+        self.total_ips = 0
+        for first, last in merged:
+            self.networks.append({
+                'net': first,
+                'size': last - first + 1,
+                'start': self.total_ips
+            })
+            self.total_ips += last - first + 1
+
         if not self.networks:
             self.networks.append({'net': 0, 'size': 0x100000000, 'start': 0})
             self.total_ips = 0x100000000
-            
+
         self.starts = [n['start'] for n in self.networks]
         self.single_net = len(self.networks) == 1
-        
+
         seed_val = seed if seed is not None else random.getrandbits(32)
         self.shuffler = FeistelShuffler(key=seed_val, max_val=self.total_ips)
 
@@ -119,10 +150,11 @@ class InclusionManager:
         idx = self.shuffler.get(index % self.total_ips)
         if self.single_net:
             return self.networks[0]['net'] + idx, index
-            
+
         i = bisect.bisect_right(self.starts, idx) - 1
         n = self.networks[i]
         return n['net'] + (idx - n['start']), index
+
 
 DEFAULT_BLACKLIST = [
     "0.0.0.0/8",       # local
@@ -135,42 +167,46 @@ DEFAULT_BLACKLIST = [
     "192.168.0.0/16",  # rfc1918
     "224.0.0.0/4",     # multicast
     "240.0.0.0/4",     # reserved
-    "255.255.255.255/32" # broadcast
+    "255.255.255.255/32"  # broadcast
 ]
 
+
 class BlacklistManager:
-    def __init__(self, include_recommended: bool = True, allow_private: bool = False, custom_networks: List[str] = None):
+    """Merged blacklist ranges with O(log n) membership queries."""
+
+    def __init__(self, include_recommended: bool = True, allow_private: bool = False,
+                 custom_networks: Optional[List[str]] = None):
         networks = []
         if custom_networks:
             networks.extend(custom_networks)
-            
+
         if not allow_private:
             networks.extend(DEFAULT_BLACKLIST)
-            
+
         if include_recommended:
-            networks.extend(["148.59.85.0/24", 
-                             "6.0.0.0/8", 
-                             "7.0.0.0/8", 
-                             "11.0.0.0/8", 
-                             "21.0.0.0/8", 
-                             "22.0.0.0/8", 
-                             "26.0.0.0/8", 
-                             "28.0.0.0/8", 
-                             "29.0.0.0/8", 
-                             "30.0.0.0/8", 
-                             "33.0.0.0/8", 
-                             "55.0.0.0/8", 
-                             "214.0.0.0/8", 
+            networks.extend(["148.59.85.0/24",
+                             "6.0.0.0/8",
+                             "7.0.0.0/8",
+                             "11.0.0.0/8",
+                             "21.0.0.0/8",
+                             "22.0.0.0/8",
+                             "26.0.0.0/8",
+                             "28.0.0.0/8",
+                             "29.0.0.0/8",
+                             "30.0.0.0/8",
+                             "33.0.0.0/8",
+                             "55.0.0.0/8",
+                             "214.0.0.0/8",
                              "215.0.0.0/8"])
-            
+
         ranges = []
         for cidr in networks:
             try:
                 net = ipaddress.ip_network(cidr.strip(), strict=False)
                 ranges.append((int(net.network_address), int(net.broadcast_address)))
-            except:
-                pass
-        
+            except ValueError as e:
+                logger.warning("ignoring invalid blacklist network %r: %s", cidr, e)
+
         ranges.sort()
         merged = []
         for start, end in ranges:
@@ -182,8 +218,8 @@ class BlacklistManager:
                     merged[-1][1] = max(last_end, end)
                 else:
                     merged.append([start, end])
-                    
-        self._flat_ranges = []
+
+        self._flat_ranges: list = []
         for start, end in merged:
             self._flat_ranges.extend([start, end])
 

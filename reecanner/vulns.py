@@ -1,12 +1,22 @@
 """Vulnerability lookup via searchsploit (ExploitDB)"""
-import subprocess
-import json
-import re
-import sys
-import shutil
-import functools
+from __future__ import annotations
 
-def has_searchsploit():
+import functools
+import json
+import logging
+import re
+import shutil
+import subprocess
+import threading
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# bound concurrent searchsploit subprocesses: probe threads could otherwise
+# fork+exec one process per host and starve the machine on large scans
+_searchsploit_sem = threading.Semaphore(2)
+
+def has_searchsploit() -> bool:
     """Check if searchsploit is available"""
     return shutil.which('searchsploit') is not None
 
@@ -18,19 +28,20 @@ def get_nmap_parser():
         try:
             from reecanner.nmap_probes import NmapProbes
             _nmap_parser = NmapProbes()
-        except: pass
+        except Exception as e:
+            logger.debug("nmap probes parser unavailable: %s", e)
     return _nmap_parser
 
-def parse_banner(banner, port=None):
+def parse_banner(banner: str, port: Optional[int] = None) -> Optional[str]:
     """Extract software name + version from a banner string"""
     if not banner:
         return None
-    
+
     parser = get_nmap_parser()
     parsed = None
     if parser:
         parsed = parser.parse_banner(banner)
-        
+
     if parsed:
         return parsed
 
@@ -41,13 +52,13 @@ def parse_banner(banner, port=None):
     m = re.search(r'([A-Za-z][\w.-]{2,})[/\s](\d+\.\d+(?:[\d.]+)?)', banner)
     if m and m.group(1).upper() not in SKIP:
         return f"{m.group(1)} {m.group(2)}"
-    
+
     return None
 
-# Softwares que vale a pena buscar mesmo sem versão (com cautela)
+# Software worth querying even without a version (with caution)
 HIGH_RISK_SOFTWARE = {
-    'DRUPAL', 'WORDPRESS', 'JOOMLA', 'MAGENTO', 'EXCHANGE', 'SHAREPOINT', 'COLDFUSION', 
-    'GITLAB', 'JENKINS', 'CONFLUENCE', 'JIRA', 'TOMCAT', 'WEBLOGIC', 'PHPMYADMIN', 
+    'DRUPAL', 'WORDPRESS', 'JOOMLA', 'MAGENTO', 'EXCHANGE', 'SHAREPOINT', 'COLDFUSION',
+    'GITLAB', 'JENKINS', 'CONFLUENCE', 'JIRA', 'TOMCAT', 'WEBLOGIC', 'PHPMYADMIN',
     'ZIMBRA', 'ROUNDCUBE', 'FORTIGATE', 'GRAFANA', 'KIBANA', 'CPANEL', 'PLESK',
     'WEBSPHERE', 'VCENTER', 'ESXI', 'SONICWALL', 'TEAMCITY'
 }
@@ -58,10 +69,11 @@ def searchsploit_query(query, max_results=5):
     if not query or not has_searchsploit():
         return []
     try:
-        result = subprocess.run(
-            ['searchsploit', '--json', '-t', query],
-            capture_output=True, text=True, timeout=10
-        )
+        with _searchsploit_sem:
+            result = subprocess.run(
+                ['searchsploit', '--json', '-t', query],
+                capture_output=True, text=True, timeout=10
+            )
         if result.returncode != 0:
             return []
         data = json.loads(result.stdout)
@@ -77,12 +89,13 @@ def searchsploit_query(query, max_results=5):
                 exploit['cve'] = cves[0]
             exploits.append(exploit)
         return exploits
-    except:
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError) as e:
+        logger.debug("searchsploit query %r failed: %s", query, e)
         return []
 
-def lookup_vulns(banner, port=None, server=None):
+def lookup_vulns(banner: Optional[str], port: Optional[int] = None, server: Optional[str] = None) -> list:
     queries = []
-    
+
     def add_query(raw):
         parsed = parse_banner(raw, port)
         if parsed:
@@ -95,10 +108,10 @@ def lookup_vulns(banner, port=None, server=None):
 
     if server: add_query(server)
     if banner: add_query(banner)
-    
+
     # dedupe queries
     queries = list(dict.fromkeys(queries))
-    
+
     all_exploits = []
     seen_ids = set()
     for q in queries:
@@ -106,5 +119,5 @@ def lookup_vulns(banner, port=None, server=None):
             if e['id'] not in seen_ids:
                 seen_ids.add(e['id'])
                 all_exploits.append(e)
-    
+
     return all_exploits

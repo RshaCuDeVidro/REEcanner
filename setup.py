@@ -1,31 +1,29 @@
-from setuptools import setup, find_packages
-from setuptools.command.build_py import build_py
-import subprocess
-import os
+"""setuptools shim: compile worker.so as part of the build.
 
-class CustomBuild(build_py):
+pyproject.toml declares static metadata; this file exists only so that
+`pip install .` / `pipx install .` (which go through the setuptools PEP 517
+backend) compile the C worker before the wheel is assembled. Without it,
+installs silently fall back to the slower pure-Python engine.
+"""
+
+import subprocess
+from pathlib import Path
+
+from setuptools import setup
+from setuptools.command.build_py import build_py
+
+ROOT = Path(__file__).parent
+
+
+class BuildPyWithWorker(build_py):
     def run(self):
-        subprocess.check_call(['make'])
+        src = ROOT / "reecanner" / "worker.c"
+        out = ROOT / "reecanner" / "worker.so"
+        if src.exists() and (
+            not out.exists() or out.stat().st_mtime < src.stat().st_mtime
+        ):
+            subprocess.run(["make"], cwd=ROOT, check=True)
         super().run()
 
-setup(
-    name='reecanner',
-    version='1.0.0',
-    description='Fast TCP/UDP network scanner build with python and C worker, identify vulns with searchsploit. shodan like',
-    author='rsha',
-    packages=['reecanner'],
-    package_data={'reecanner': ['worker.so', 'data/*']},
-    include_package_data=True,
-    install_requires=[
-        'rich',
-        'redis',
-    ],
-    entry_points={
-        'console_scripts': [
-            'reecanner=reecanner.__main__:main',
-        ],
-    },
-    cmdclass={
-        'build_py': CustomBuild,
-    },
-)
+
+setup(cmdclass={"build_py": BuildPyWithWorker})

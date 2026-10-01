@@ -34,3 +34,10 @@ venv.bak/
 *.log
 resume.cfg
 checkpoint.json
+*.ckpt
+vuln_report.json
+
+# test/tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

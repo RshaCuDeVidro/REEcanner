@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reecanner"
+version = "1.0.0"
+description = "Fast TCP/UDP network scanner built with python and a C worker, identify vulns with searchsploit. shodan like"
+readme = "README.md"
+authors = [{ name = "rsha" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+dependencies = [
+    "rich",
+    "cryptography",
+]
+
+[project.optional-dependencies]
+redis = ["redis"]
+
+[project.urls]
+Homepage = "https://github.com/RshaCuDeVidro/REEcanner"
+
+[project.scripts]
+reecanner = "reecanner.__main__:main"
+
+[tool.setuptools]
+packages = ["reecanner"]
+
+[tool.setuptools.package-data]
+reecanner = ["worker.so", "data/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+warn_unused_ignores = false
