@@ -747,12 +747,74 @@ def process_packet(data: bytes, src_port: int, seen_hosts: set, found_count,
     sink.emit(resp)
 
 
+class _SockFilter(ctypes.Structure):
+    """struct sock_filter — classic BPF instruction (8 bytes)."""
+    _fields_ = [
+        ("code", ctypes.c_ushort),
+        ("jt", ctypes.c_ubyte),
+        ("jf", ctypes.c_ubyte),
+        ("k", ctypes.c_uint),
+    ]
+
+
+class _SockFprog(ctypes.Structure):
+    """struct sock_fprog — program length + pointer to instructions."""
+    _fields_ = [
+        ("len", ctypes.c_ushort),
+        ("filter", ctypes.POINTER(_SockFilter)),
+    ]
+
+
+def _bpf_insn(code: int, jt: int, jf: int, k: int) -> _SockFilter:
+    """Build one classic-BPF instruction with the real sock_filter layout."""
+    return _SockFilter(code=code, jt=jt, jf=jf, k=k)
+
+
+def build_bpf_program(src_port: int, icmp: bool = False, udp: bool = False) -> list:
+    """Classic BPF program: keep only replies destined to our source port.
+
+    Without this the sniffer wakes the Python process for every bit of
+    unrelated TCP/UDP traffic on the host. The kernel drops everything else.
+
+    Returns a list of ``_SockFilter`` instructions.
+    """
+    if icmp:
+        # ICMP type at offset 20 (IPv4 header without options): echo reply = 0
+        return [
+            _bpf_insn(0x30, 0, 0, 20),          # ldb [20]
+            _bpf_insn(0x15, 0, 1, 0),           # jeq 0, KEEP, DROP
+            _bpf_insn(0x06, 0, 0, 0x00040000),  # KEEP: ret 0x40000
+            _bpf_insn(0x06, 0, 0, 0),           # DROP: ret 0
+        ]
+    if udp:
+        # UDP: dst port at offset 22
+        return [
+            _bpf_insn(0x28, 0, 0, 22),          # ldh [22]
+            _bpf_insn(0x15, 0, 1, src_port),    # jeq src_port, KEEP, DROP
+            _bpf_insn(0x06, 0, 0, 0x00040000),  # KEEP: ret 0x40000
+            _bpf_insn(0x06, 0, 0, 0),           # DROP: ret 0
+        ]
+    # TCP: dst port at offset 22, flags at offset 33
+    return [
+        _bpf_insn(0x28, 0, 0, 22),          # ldh [22]
+        _bpf_insn(0x15, 0, 4, src_port),    # jeq src_port, NEXT, DROP
+        _bpf_insn(0x30, 0, 0, 33),          # ldb [33]
+        _bpf_insn(0x54, 0, 0, 0x12),        # and 0x12
+        _bpf_insn(0x15, 0, 1, 0x12),        # jeq 0x12, KEEP, DROP
+        _bpf_insn(0x06, 0, 0, 0x00040000),  # KEEP: ret 0x40000
+        _bpf_insn(0x06, 0, 0, 0),           # DROP: ret 0
+    ]
+
+
 def _attach_bpf(sock: socket.socket, insns: list) -> None:
-    """Attach a classic BPF program (list of packed sock_filter structs)."""
-    bpf_program = b''.join(insns)
-    fprog = struct.pack('HL', len(insns), struct.unpack('L', struct.pack('P', bpf_program))[0])
-    # SO_ATTACH_FILTER = 26
-    sock.setsockopt(socket.SOL_SOCKET, 26, fprog)
+    """Attach a classic BPF program (list of ``_SockFilter``) to a raw socket."""
+    arr = (_SockFilter * len(insns))(*insns)
+    fprog = _SockFprog(
+        len=len(insns),
+        filter=ctypes.cast(arr, ctypes.POINTER(_SockFilter)),
+    )
+    # SO_ATTACH_FILTER = 26. ``arr`` must stay alive until setsockopt returns.
+    sock.setsockopt(socket.SOL_SOCKET, 26, bytes(fprog))
 
 
 def sniffer_process(src_port, run_event, found_count, quiet, use_color, limit, simple=False,
@@ -776,36 +838,10 @@ def sniffer_process(src_port, run_event, found_count, quiet, use_color, limit, s
 
         # BPF Filter: kernel-level filtering so Python never sees unrelated traffic.
         try:
-            if icmp:
-                # ICMP type at offset 20 (IPv4 header without options): echo reply = 0
-                bpf_insns = [
-                    struct.pack('HHIB', 0x30, 0, 0, 20),          # ldb [20]
-                    struct.pack('HHIB', 0x15, 0, 1, 0),           # jeq 0, KEEP, DROP
-                    struct.pack('HHIB', 0x06, 0, 0, 0x00040000),  # KEEP: ret 0x40000
-                    struct.pack('HHIB', 0x06, 0, 0, 0)            # DROP: ret 0
-                ]
-            elif udp:
-                # UDP: dst port at offset 22
-                bpf_insns = [
-                    struct.pack('HHIB', 0x28, 0, 0, 22),       # ldh [22]
-                    struct.pack('HHIB', 0x15, 0, 1, src_port), # jeq src_port, K, D
-                    struct.pack('HHIB', 0x06, 0, 0, 0x00040000), # K: ret 0x40000
-                    struct.pack('HHIB', 0x06, 0, 0, 0)          # D: ret 0
-                ]
-            else:
-                # TCP: dst port at offset 22, flags at offset 33
-                bpf_insns = [
-                    struct.pack('HHIB', 0x28, 0, 0, 22),       # ldh [22]
-                    struct.pack('HHIB', 0x15, 0, 4, src_port), # jeq src_port, NEXT, DROP
-                    struct.pack('HHIB', 0x30, 0, 0, 33),       # ldb [33]
-                    struct.pack('HHIB', 0x54, 0, 0, 0x12),     # and 0x12
-                    struct.pack('HHIB', 0x15, 0, 1, 0x12),     # jeq 0x12, KEEP, DROP
-                    struct.pack('HHIB', 0x06, 0, 0, 0x00040000), # KEEP: ret 0x40000
-                    struct.pack('HHIB', 0x06, 0, 0, 0)          # DROP: ret 0
-                ]
-            _attach_bpf(sock, bpf_insns)
-        except (OSError, struct.error) as e:
-            logger.debug("BPF attach failed, falling back to software filtering: %s", e)
+            _attach_bpf(sock, build_bpf_program(src_port, icmp=icmp, udp=udp))
+        except OSError as e:
+            logger.debug("BPF attach failed (errno=%s), falling back to software filtering: %s",
+                         getattr(e, "errno", "?"), e)
 
     except OSError as e:
         logger.error("sniffer failed to create raw socket: %s", e)
@@ -883,6 +919,9 @@ class ScannerConfig:
     udp_payload: str = 'auto'
     ping_sweep: bool = False
     net_info: Optional[tuple] = None
+    force_raw_ip: bool = False
+    preflight: bool = True
+    preflight_target: Optional[str] = None
     user_agent: str = 'reecanner/1.0'
     no_port: bool = False
     redis_url: Optional[str] = None
@@ -951,7 +990,24 @@ class Scanner:
         self.cur_idx_array = multiprocessing.RawArray(ctypes.c_uint64, self.workers_count)
         self.error_queue = multiprocessing.Queue()
 
-        self.net_info = config.net_info or get_net_info()
+        # AF_PACKET needs the interface AND both MACs (local + gateway). If the
+        # gateway MAC could not be resolved, fall back to SOCK_RAW: the C worker
+        # would otherwise memcpy from a NULL pointer and the Python worker would
+        # crash building the ethernet header.
+        net_info = config.net_info or get_net_info()
+        if (not config.force_raw_ip and net_info and net_info[0]
+                and net_info[1] and net_info[2]):
+            self.net_info = tuple(net_info)
+        else:
+            if not config.force_raw_ip and net_info and net_info[0]:
+                logger.warning(
+                    "AF_PACKET disabled (no gateway MAC for %s); using SOCK_RAW",
+                    net_info[0],
+                )
+            self.net_info = (None, None, None)
+        self.force_raw_ip = config.force_raw_ip
+        self.preflight = config.preflight
+        self.preflight_target = config.preflight_target
         self.seed = self.inc_mgr.shuffler.seed
         self.start_index = config.start_index
         self.shards = config.shards
@@ -1176,6 +1232,26 @@ class Scanner:
                 no_color = True
                 def print(self, *args, **kwargs): pass
             console = DummyConsole()
+
+        # Preflight: confirm replies can actually reach us through the real
+        # send path. A stateful firewall drops AF_PACKET replies silently and
+        # the scan would otherwise just report 0 hosts. ICMP sweeps are exempt
+        # (the CANARY probe is TCP; an icmp-only firewall would false-alarm).
+        if self.preflight and not self.ping_sweep:
+            try:
+                from reecanner.preflight import run_preflight
+                # Use a DIFFERENT source port than the scan: the probe's own
+                # SYN-ACK (e.g. from the canary) must not leak into results,
+                # which are keyed on the scan's src_port.
+                probe_port = self.src_port + 1 if self.src_port < 38999 else 10000
+                warn = run_preflight(self.local_ip_bytes, probe_port, self.net_info,
+                                     self.preflight_target)
+            except Exception as e:  # diagnostics must never break the scan
+                warn = None
+                logger.debug("preflight unavailable: %s", e)
+            if warn:
+                console.print(warn, markup=False)
+                logger.warning("preflight: replies may be blocked by the host firewall")
 
         # start probe engine if needed
         probe_engine = None
@@ -1480,3 +1556,7 @@ class Scanner:
     @property
     def found_total(self) -> int:
         return self.found_count.value
+
+    @property
+    def sent_total(self) -> int:
+        return sum(self.sent_array)

@@ -70,6 +70,12 @@ def main() -> None:
     parser.add_argument("--adaptive-grace", type=float, default=10.0, metavar="SECONDS",
                         help="startup grace period before adaptive rate decisions (default: 10)")
     parser.add_argument("--interface", metavar="IFACE", help="send packets through this interface (bypass auto-detection)")
+    parser.add_argument("--no-afpacket", action="store_true",
+                        help="use SOCK_RAW instead of AF_PACKET (workaround when a stateful firewall drops replies)")
+    parser.add_argument("--no-preflight", action="store_true",
+                        help="skip the startup reachability probe (see Troubleshooting in the README)")
+    parser.add_argument("--preflight-target", metavar="IP:PORT",
+                        help="override the preflight probe target (default: 1.1.1.1:443, 8.8.8.8:443)")
     parser.add_argument("--user-agent", metavar="UA", default="reecanner/1.0",
                         help="User-Agent header for HTTP probes (default: reecanner/1.0)")
     parser.add_argument("--bandwidth", type=float, metavar="BITS",
@@ -256,6 +262,8 @@ def main() -> None:
         banners=args.banners, http_probe=args.http_probe, vulns=args.vulns,
         udp=args.udp, adaptive=args.adaptive, adaptive_grace=args.adaptive_grace,
         udp_payload=args.udp_payload, ping_sweep=args.ping_sweep, net_info=net_info,
+        force_raw_ip=args.no_afpacket, preflight=not args.no_preflight,
+        preflight_target=args.preflight_target,
         user_agent=args.user_agent, no_port=args.no_port, redis_url=args.redis,
         wait=args.wait, output_append=args.output_append, status_json=args.status_json,
     )
@@ -287,6 +295,8 @@ def main() -> None:
         console.print(f"[bold green][*][/bold green] udp payload: [cyan]{args.udp_payload}[/cyan]")
     if args.interface and net_info:
         console.print(f"[bold green][*][/bold green] interface: [cyan]{args.interface}[/cyan]")
+    if args.no_afpacket:
+        console.print("[bold green][*][/bold green] send path: [cyan]SOCK_RAW[/cyan] (--no-afpacket)")
     if args.user_agent != "reecanner/1.0":
         console.print(f"[bold green][*][/bold green] user-agent: [cyan]{args.user_agent}[/cyan]")
     if args.status_json:
@@ -305,6 +315,15 @@ def main() -> None:
             console.print("\n[bold yellow]scan stats[/bold yellow]")
             console.print(f"  time elapsed: [cyan]{duration:.2f}s[/cyan]")
             console.print(f"  hosts found:  [green]{scanner.found_total}[/green]")
+            # Backstop: packets went out but nothing came back -- likely the
+            # same stateful-firewall drop the preflight looks for.
+            if scanner.found_total == 0 and scanner.sent_total > 0 and not args.ping_sweep:
+                try:
+                    from reecanner.preflight import firewall_hint, format_zero_hits_hint
+                    console.print(format_zero_hits_hint(scanner.src_port, firewall_hint()),
+                                  markup=False)
+                except Exception:
+                    pass
             # output formats
             results = scanner.get_results()
             meta = JsonWriter.default_meta(duration, ports, scanner.found_total)

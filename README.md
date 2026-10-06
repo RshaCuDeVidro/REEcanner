@@ -102,6 +102,12 @@ SCAN CONTROL
                               (default: 3)
   --interface IFACE           send packets through this interface
                               (bypass auto-detection)
+  --no-afpacket               force SOCK_RAW instead of AF_PACKET. Use when a
+                              stateful firewall drops AF_PACKET replies (see
+                              Troubleshooting). Lower throughput.
+  --no-preflight              skip the startup reachability probe
+  --preflight-target IP:PORT  override the preflight probe target
+                              (default: 1.1.1.1:443, 8.8.8.8:443)
   --udp                       UDP scan mode instead of TCP SYN
   --udp-payload PAYLOAD       UDP probe payload: auto, dns, ntp, snmp, ssdp,
                               memcached (default: auto = rotate all)
@@ -425,6 +431,50 @@ which creates significant overhead at scale.
   sniffer process.
 - `AF_PACKET` is used automatically when the default gateway is reachable.
   If it falls back to `SOCK_RAW`, throughput will be lower.
+
+## Troubleshooting
+
+### The scan finishes but finds 0 hosts
+
+On a host with a stateful firewall this is usually not a scanner bug. The
+fast `AF_PACKET` transmit path bypasses the kernel connection tracker, so
+incoming SYN-ACKs have no conntrack entry. A firewall such as
+
+```
+-P INPUT DROP
+-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -j REJECT
+```
+
+then drops every reply, and the scan silently reports nothing.
+
+REEcanner signals this in two ways:
+
+- **Startup preflight** — it sends one SYN to `1.1.1.1:443` (and `8.8.8.8:443`)
+  through the same path the scan will use and watches for the SYN-ACK. If none
+  arrives it retries over `SOCK_RAW`; when that succeeds it reports that the
+  drop is specific to `AF_PACKET`. On failure it prints the fix below.
+  Disable with `--no-preflight`, override the target with `--preflight-target`.
+- **End-of-scan hint** — if packets were sent and 0 hosts were found it prints
+  a short reminder.
+
+Fixes, in order of preference:
+
+```
+# 1. skip AF_PACKET for this run (SOCK_RAW creates conntrack state)
+sudo reecanner <target> -p 22,80 --no-afpacket
+
+# 2. keep AF_PACKET and let the replies through (source-port range is 10000-38999)
+sudo iptables -I INPUT -p tcp -m tcp --dport 10000:38999 \
+     --tcp-flags SYN,ACK SYN,ACK -j ACCEPT
+
+# 3. on cloud hosts, allow inbound TCP SYN-ACK to the source-port range in the
+#    security list / security group
+```
+
+The preflight probe costs a single SYN per target and is safe to leave on; use
+`--no-preflight` on air-gapped or internal-only hosts where no public canary is
+reachable.
 
 ## How It Works
 
