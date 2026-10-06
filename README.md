@@ -573,6 +573,20 @@ reecanner/
 tests/               pytest suite
 ```
 
+## Performance / vantage
+
+If a cloud VPS finds far fewer hosts than a home connection for the same seed
+and code, the bottleneck is usually the network path, not the scanner. The
+guest can be completely lossless (0 drops, idle CPU, all NIC-visible SYN-ACKs
+captured) and still receive few replies because the datacenter network throttles
+high-rate scan traffic.
+
+- Diagnose and tune a vantage with `sudo tools/vantage_bench.sh`.
+- Full write-up (method, evidence, options): [`docs/vantage.md`](docs/vantage.md).
+
+Rule of thumb: if hosts/second is flat across rates, the vantage is the
+bottleneck — sending faster does not find more.
+
 ## Legal
 
 This tool is intended for authorized security research and network
