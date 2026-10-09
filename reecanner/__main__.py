@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     parser = argparse.ArgumentParser(description="reecanner - fast ip/port scout")
     parser.add_argument("target", nargs="?", help="target cidr (e.g., 45.0.0.0/8). use - for stdin")
-    parser.add_argument("-b", "--blacklist-file", type=argparse.FileType('r'))
+    parser.add_argument("-b", "--blacklist-file", metavar="FILE", help="file with blacklist networks, one per line")
     parser.add_argument("-s", "--source-port", type=int, default=0)
     parser.add_argument("-p", "--ports", default="80")
     parser.add_argument("-r", "--rate-limit", type=int, default=1000)
@@ -38,7 +38,7 @@ def main() -> None:
     parser.add_argument("-w", "--workers", type=int)
     parser.add_argument("-l", "--limit", type=int, default=0)
     parser.add_argument("-i", "--include")
-    parser.add_argument("--include-file", type=argparse.FileType('r'))
+    parser.add_argument("--include-file", metavar="FILE", help="file with target networks, one per line")
     parser.add_argument("--scan-private", action="store_true", help="allow scanning private/local networks (e.g., 192.168.0.0/16)")
     parser.add_argument("-o", "--output")
     parser.add_argument("--output-append", metavar="FILE", help="stream results as JSON lines while scanning (append mode)")
@@ -164,10 +164,14 @@ def main() -> None:
     if args.include:
         inc_networks.extend(args.include.split(","))
     if args.include_file:
-        for line in args.include_file:
-            line = line.strip()
-            if line:
-                inc_networks.append(line)
+        try:
+            with open(args.include_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        inc_networks.append(line)
+        except OSError as e:
+            _arg_error(f"could not read include file {args.include_file!r}: {e}")
 
     # Process ASN targets (e.g. AS14061) -> Resolve to CIDRs
     final_inc_networks = []
@@ -187,10 +191,14 @@ def main() -> None:
 
     bl_networks = []
     if args.blacklist_file:
-        for line in args.blacklist_file:
-            line = line.strip()
-            if line:
-                bl_networks.append(line)
+        try:
+            with open(args.blacklist_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        bl_networks.append(line)
+        except OSError as e:
+            _arg_error(f"could not read blacklist file {args.blacklist_file!r}: {e}")
     # inline exclude
     if args.exclude:
         bl_networks.extend(args.exclude.split(","))
@@ -210,8 +218,15 @@ def main() -> None:
         except (OSError, json.JSONDecodeError) as e:
             console.print(f"[bold yellow][*][/bold yellow] could not read checkpoint file: {e}")
 
-    inc_mgr = InclusionManager(inc_networks if inc_networks else None, seed=start_seed)
     bl_mgr = BlacklistManager(include_recommended=not args.disable_recommended, allow_private=args.scan_private, custom_networks=bl_networks)
+    # build the inclusion manager with the blacklist so blacklisted ranges are
+    # removed from the target space up front (correct totals/ETA, no scan-wide
+    # abort when a target is mostly blacklisted)
+    try:
+        inc_mgr = InclusionManager(inc_networks if inc_networks else None, seed=start_seed,
+                                   blacklist=bl_mgr)
+    except ValueError as e:
+        _arg_error(str(e))
 
     if not args.scan_private:
         has_private = False

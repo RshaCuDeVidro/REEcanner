@@ -374,7 +374,19 @@ def packet_worker(cfg: WorkerConfig) -> None:
     fail_array = cfg.fail_array
     idx_array = cfg.idx_array
 
-    current_index = cfg.start_index + worker_id
+    # Shard distribution: step over the shard's own index sub-space so work is
+    # spread across ALL workers. Stepping by total_workers alone (with a plain
+    # idx%shards==shard_id skip) leaves whole workers idle whenever shards
+    # divides total_workers, because each worker's residue mod shards is then
+    # fixed. Here worker w walks shard_id + (w + k*W)*shards, which together
+    # cover exactly the indices of this shard with no gaps or overlap.
+    if shards > 1:
+        step = total_workers * shards
+        first_shard_idx = cfg.start_index + ((shard_id - cfg.start_index) % shards)
+        current_index = first_shard_idx + worker_id * shards
+    else:
+        step = total_workers
+        current_index = cfg.start_index + worker_id
     get_ip = inc_mgr.get_random_ip_int
     is_pub = bl_mgr.is_ip_int_public
     ports_len = len(ports)
@@ -412,13 +424,10 @@ def packet_worker(cfg: WorkerConfig) -> None:
                 if current_index >= total_work:
                     scan_done = True
                     break
-                if shards > 1 and (current_index % shards) != shard_id:
-                    current_index += total_workers
-                    continue
 
                 ip_idx = current_index // ports_len
                 ip_int, _ = get_ip(ip_idx)
-                current_index += total_workers
+                current_index += step
                 if is_pub(ip_int): break
                 attempts += 1
                 if attempts > MAX_BLACKLIST_ATTEMPTS:
@@ -428,7 +437,7 @@ def packet_worker(cfg: WorkerConfig) -> None:
                 if not run_event.is_set(): return
             if scan_done: break
 
-            port_idx = (current_index - total_workers) % ports_len
+            port_idx = (current_index - step) % ports_len
             port = ports[port_idx]
 
             # probe payload: round-robin across target IPs (UDP multi-payload)
@@ -1051,12 +1060,22 @@ class Scanner:
         self._last_pps_sum = 0
 
     def _get_local_ip(self) -> str:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-        finally:
-            s.close()
+        # A connected UDP socket reveals the source IP the kernel would use.
+        # Try two well-known addresses so a single unreachable one does not
+        # abort the scan with a bare OSError traceback.
+        for probe_ip in ("8.8.8.8", "1.1.1.1"):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect((probe_ip, 80))
+                return s.getsockname()[0]
+            except OSError as e:
+                logger.debug("local IP probe via %s failed: %s", probe_ip, e)
+            finally:
+                s.close()
+        raise RuntimeError(
+            "could not determine the local source IP (no route to the internet?); "
+            "pass --interface or check connectivity"
+        )
 
     def _drain_errors(self) -> list:
         errors = []

@@ -123,6 +123,7 @@ class RichTableWriter:
 
     def write(self, results: list, probe_results: Optional[list] = None,
               show_vulns: bool = False) -> None:
+        from rich.markup import escape
         from rich.table import Table
 
         probe_map = {}
@@ -169,15 +170,17 @@ class RichTableWriter:
                 dom_str = ", ".join(unique_doms)
                 if len(dom_str) > 40:
                     dom_str = dom_str[:37] + "..."
-                row.append(dom_str)
+                # remote-sourced: escape so bracketed values are not parsed as
+                # rich markup (a hostile banner/cert would otherwise crash here)
+                row.append(escape(dom_str))
 
-            row.extend([port, svc])
+            row.extend([port, escape(svc)])
 
             if has_probes:
                 version = pr.get('server', '')
                 if not version and 'banner' in pr:
                     version = pr['banner'][:50]
-                row.append(version)
+                row.append(escape(version))
 
             table.add_row(*row)
 
@@ -208,9 +211,9 @@ class RichTableWriter:
                 for ex in exploits:
                     vtable.add_row(
                         host,
-                        ex.get('id', ''),
-                        ex.get('cve', ''),
-                        ex.get('title', '')[:70]
+                        escape(ex.get('id', '')),
+                        escape(ex.get('cve', '')),
+                        escape(ex.get('title', '')[:70])
                     )
 
             self.console.print(vtable)

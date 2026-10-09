@@ -98,10 +98,34 @@ def resolve_asn(asn: str) -> list[str]:
         return []
 
 
+def _subtract_ranges(incl: list, bl_pairs: list) -> list:
+    """Carve the blacklist ranges out of the (sorted, merged) inclusion ranges.
+
+    ``incl`` is a list of ``[first, last]`` (sorted, non-overlapping); ``bl_pairs``
+    is a sorted list of ``(start, end)`` blacklist ranges. Returns the surviving
+    sub-ranges, still sorted and non-overlapping.
+    """
+    result: list = []
+    for first, last in incl:
+        cur = first
+        for s, e in bl_pairs:
+            if e < cur or s > last:
+                continue  # no overlap with the remaining slice
+            if s > cur:
+                result.append([cur, min(s - 1, last)])
+            cur = max(cur, e + 1)
+            if cur > last:
+                break
+        if cur <= last:
+            result.append([cur, last])
+    return result
+
+
 class InclusionManager:
     """Holds the target networks and maps shuffled indices to IP addresses."""
 
-    def __init__(self, networks_list: Optional[List[str]] = None, seed: Optional[int] = None):
+    def __init__(self, networks_list: Optional[List[str]] = None, seed: Optional[int] = None,
+                 blacklist: "Optional[BlacklistManager]" = None):
         self.networks: list = []
         if not networks_list or len(networks_list) == 0:
             networks_list = ["0.0.0.0/0"]
@@ -126,6 +150,22 @@ class InclusionManager:
                 merged[-1][1] = max(merged[-1][1], last)
             else:
                 merged.append([first, last])
+
+        # Subtract the blacklist from the target space up front. Otherwise a
+        # target that is mostly blacklisted (e.g. 10.0.0.0/8 with the default
+        # private-range blacklist) makes every worker burn through candidates
+        # until the 10k-consecutive-blacklisted guard trips and aborts the whole
+        # scan, and total_ips/ETA count addresses that are never actually sent.
+        if blacklist is not None and blacklist._flat_ranges:
+            flat = blacklist._flat_ranges
+            bl_pairs = [(flat[i], flat[i + 1]) for i in range(0, len(flat), 2)]
+            had_targets = bool(merged)
+            merged = _subtract_ranges(merged, bl_pairs)
+            if had_targets and not merged:
+                raise ValueError(
+                    "all target networks are excluded by the blacklist "
+                    "(nothing left to scan)"
+                )
 
         self.total_ips = 0
         for first, last in merged:

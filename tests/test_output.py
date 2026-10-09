@@ -85,3 +85,19 @@ def test_sqlite_schema_and_rows(tmp_path, sample_results):
         assert rows[1][2] == "tcp"
     finally:
         conn.close()
+
+
+def test_rich_table_survives_markup_in_remote_data():
+    """A hostile banner/header containing rich-markup brackets must not crash
+    the end-of-scan summary table."""
+    from rich.console import Console
+
+    from reecanner.output import RichTableWriter
+
+    console = Console(no_color=True, file=open("/dev/null", "w"))
+    results = [{"ip": "203.0.113.7", "port": 80, "proto": "tcp", "service": "http"}]
+    probes = [{"ip": "203.0.113.7", "port": 80, "server": "Apache [/not-a-tag]",
+               "hostname": "x[y].example", "exploits": [
+                   {"id": "EDB-1", "cve": "CVE-2020-0001", "title": "boom [/x]"}]}]
+    # would raise rich.errors.MarkupError before the escape() fix
+    RichTableWriter(console).write(results, probe_results=probes, show_vulns=True)

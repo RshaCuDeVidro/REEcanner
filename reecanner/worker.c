@@ -314,7 +314,19 @@ void run_worker(
     uint64_t interval_ns = 0;
     int last_rate_limit = -1;
 
+    /* Shard distribution: step over the shard's own index sub-space so work is
+       spread across ALL workers. Stepping by total_workers with a plain
+       cur_idx%shards==shard_id skip leaves whole workers idle whenever shards
+       divides total_workers (each worker's residue mod shards is then fixed).
+       Worker w walks shard_id + (w + k*W)*shards, which together cover exactly
+       this shard's indices with no gaps or overlap. */
+    int64_t step = total_workers;
     int64_t cur_idx = start_index + worker_id;
+    if (shards > 1) {
+        step = (int64_t)total_workers * shards;
+        int64_t r = (((int64_t)shard_id - start_index) % shards + shards) % shards;
+        cur_idx = start_index + r + (int64_t)worker_id * shards;
+    }
     uint64_t total_work = total_ips * (uint64_t)ports_len * (uint64_t)retries;
 
     int64_t last_shuf_idx = -1;
@@ -349,10 +361,6 @@ void run_worker(
 
             for (;;) {
                 if (unlikely((uint64_t)cur_idx >= total_work)) goto flush;
-                if (unlikely(shards > 1 && (cur_idx % shards) != shard_id)) {
-                    cur_idx += total_workers;
-                    continue;
-                }
 
                 shuf_idx = (int64_t)(((uint64_t)cur_idx / ports_len) % total_ips);
                 if (shuf_idx != last_shuf_idx) {
@@ -363,14 +371,14 @@ void run_worker(
                 }
 
                 ip_int = cached_ip;
-                cur_idx += total_workers;
+                cur_idx += step;
                 if (likely(cached_public)) break;
 
                 if (unlikely(++attempts > 10000)) { *run_flag = 0; goto done; }
                 if (unlikely(!*run_flag)) goto done;
             }
 
-            uint32_t port_idx = (uint32_t)((uint64_t)(cur_idx - total_workers) % ports_len);
+            uint32_t port_idx = (uint32_t)((uint64_t)(cur_idx - step) % ports_len);
             uint16_t port = ports[port_idx];
 
             /* probe payload: round-robin across target IPs (UDP only) */

@@ -1,6 +1,7 @@
 """Port lists and service-name database."""
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ def load_ports_db() -> dict:
         _ports_db = {}
     return _ports_db
 
+@functools.lru_cache(maxsize=4096)
 def get_service_name(port: int) -> str:
     db = load_ports_db()
     entries = db.get(str(port), [])
